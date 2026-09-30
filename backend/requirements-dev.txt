@@ -1,0 +1,6 @@
+# Development / CI dependencies (runtime deps live in requirements.txt)
+-r requirements.txt
+
+pytest>=8.0
+httpx>=0.27        # required by starlette TestClient used in the test suite
+pip-audit>=2.7
