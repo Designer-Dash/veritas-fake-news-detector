@@ -149,9 +149,14 @@ def main() -> int:
         banner = None
         for i in range(20):
             time.sleep(2)
+            # The banner lives in a CLOSED shadow root (page JS must not reach
+            # it), so light-DOM detection is the host element + its geometry;
+            # textual proof comes from the screenshot below.
             banner = evaluate(
-                "(() => { const b = document.getElementById('veritas-banner');"
-                " return b ? { text: b.innerText.slice(0, 400) } : null; })()"
+                "(() => { const h = document.getElementById('veritas-banner-host');"
+                " if (!h) return null; const r = h.getBoundingClientRect();"
+                " return { rendered: r.width > 0 && r.height > 0, w: Math.round(r.width), h: Math.round(r.height),"
+                " x: Math.round(r.x), y: Math.round(r.y) }; })()"
             )
             if banner:
                 break

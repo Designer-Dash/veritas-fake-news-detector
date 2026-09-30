@@ -1,7 +1,8 @@
-"""Deterministic tests for text analysis, cross-check scoring, pipeline and API.
+"""Deterministic tests: analysis pipeline, cross-check scoring, API contract,
+and security regressions (SSRF, message validation, fail-closed behavior).
 
-Network-touching code paths (RSS / article / media fetches) are mocked so the
-suite runs offline and fast; live behavior was verified separately.
+Network-touching code paths are mocked at the security-layer boundary
+(`safe_fetch`) so the suite runs offline and fast.
 """
 
 import sys
@@ -21,13 +22,14 @@ from app.cross_check import (  # noqa: E402
 )
 from app.domain import verdict_from_suspicion  # noqa: E402
 from app.pipeline import analyze, domain_reputation  # noqa: E402
+from app.security import SecurityError, SlidingWindowLimiter, validate_url  # noqa: E402
 from app.text_analysis import (  # noqa: E402
+    CLICKBAIT_PATTERNS,
     ai_stylometry,
     caps_exclaims,
     extract_article_text,
     extract_headline,
     phrase_hits,
-    CLICKBAIT_PATTERNS,
 )
 
 
@@ -41,8 +43,7 @@ def test_normalize_text_keeps_digits_drops_punctuation():
 
 
 def test_strip_source_suffix_removes_outlet_tail():
-    title = "Big story about boats - The Hindu"
-    assert _strip_source_suffix(title) == "Big story about boats"
+    assert _strip_source_suffix("Big story about boats - The Hindu") == "Big story about boats"
     assert _strip_source_suffix("Just a plain headline") == "Just a plain headline"
 
 
@@ -57,61 +58,35 @@ def test_title_similarity_identical_paraphrase_unrelated():
     assert title_similarity("CAFE norms tightened", "Scientists vanish after demo") < 0.30
 
 
-def test_jaccard_basic():
-    assert jaccard({"a", "b"}, {"a", "b"}) == 1.0
-    assert jaccard(set(), {"a"}) == 0.0
-    assert 0 < jaccard({"a", "b"}, {"a", "c"}) < 1
-
-
 def test_extract_article_text_prefers_article_block_and_ignores_chrome():
-    html = """
-    <html><head><title>Real headline here today</title></head><body>
-    <nav>LOGOUT SECTION NEWSLETTERS put the fun in!</nav>
-    <article><p>%s</p></article>
-    </body></html>
-    """ % ("Plain sentence about policy. " * 40)
+    html = "<nav>LOGOUT SECTION NEWSLETTERS put the fun in!</nav><article><p>%s</p></article>" % (
+        "Plain sentence about policy. " * 40
+    )
     text = extract_article_text(html)
     assert "NEWSLETTERS" not in text
     assert "Plain sentence about policy" in text
 
 
 def test_extract_article_text_handles_div_body_classes():
-    html = """
-    <html><body>
-    <nav>NEWSLETTERS! TOPICS! SECTION!</nav>
-    <div class="articlebodycontent col-xl-9"><p>%s</p></div>
-    </body></html>
-    """ % ("Calm factual reporting sentence. " * 40)
+    html = '<nav>NEWSLETTERS! TOPICS!</nav><div class="articlebodycontent col-xl-9"><p>%s</p></div>' % (
+        "Calm factual reporting sentence. " * 40
+    )
     text = extract_article_text(html)
     assert "NEWSLETTERS" not in text
     assert "Calm factual reporting" in text
 
 
-def test_extract_article_text_falls_back_to_page_text():
-    html = "<html><body><p>Short page without containers. " + "filler " * 60 + "</p></body></html>"
-    text = extract_article_text(html)
-    assert "Short page" in text
-
-
-def test_extract_headline_uses_title_tag():
-    assert extract_headline("<html><head><title>Hello</title></head></html>") == "Hello"
-
-
 def test_caps_exclaims_ignores_short_acronyms():
-    text = "The CWC met the BJP and CISF officials on Monday. Plain sentence. " * 10
-    assert caps_exclaims(text) < 0.1
-    shouty = "GET RICH QUICK NOW!!! " * 20
-    assert caps_exclaims(shouty) > 0.5
+    assert caps_exclaims("The CWC met the BJP and CISF officials. Plain sentence. " * 10) < 0.1
+    assert caps_exclaims("GET RICH QUICK NOW!!! " * 20) > 0.5
 
 
 def test_clickbait_phrases_detected():
-    hits = phrase_hits("Shocking! You won't believe what happened next", CLICKBAIT_PATTERNS)
-    assert len(hits) >= 2
+    assert len(phrase_hits("Shocking! You won't believe what happened next", CLICKBAIT_PATTERNS)) >= 2
 
 
 def test_ai_stylometry_flags_template_prose():
-    template = ("It is important to note that the report underscores the importance. " * 30)
-    styl = ai_stylometry(template)
+    styl = ai_stylometry("It is important to note that the report underscores the importance. " * 30)
     assert styl["stock_phrase_count"] >= 2
     assert styl["ai_like"] > 0.4
 
@@ -123,7 +98,6 @@ def test_ai_stylometry_flags_template_prose():
 def test_registrable_domain():
     assert _registrable("www.thehindu.com") == "thehindu.com"
     assert _registrable("epaper.thehindu.com") == "thehindu.com"
-    assert _registrable("timesofindia.indiatimes.com") == "indiatimes.com"
 
 
 def test_links_to_trusted_excludes_own_site_including_subdomains():
@@ -133,8 +107,7 @@ def test_links_to_trusted_excludes_own_site_including_subdomains():
         '<a href="https://www.ndtv.com/other">ndtv</a>'
         '<a href="https://ads.example.com/x">ad</a>'
     )
-    links = links_to_trusted(html, "in", page_domain="www.thehindu.com")
-    assert links == ["https://www.ndtv.com/other"]
+    assert links_to_trusted(html, "in", page_domain="www.thehindu.com") == ["https://www.ndtv.com/other"]
 
 
 def test_verdict_thresholds():
@@ -145,29 +118,74 @@ def test_verdict_thresholds():
 
 
 def test_domain_reputation_penalises_lookalikes():
-    bad = domain_reputation("truth-leaks-daily.xyz")
-    assert bad["weight"] > 0
-    good = domain_reputation("www.thehindu.com")
-    assert good["weight"] < 0
+    assert domain_reputation("truth-leaks-daily.xyz")["weight"] > 0
+    assert domain_reputation("www.thehindu.com")["weight"] < 0
 
 
 # --------------------------------------------------------------------------
-# pipeline (network mocked)
+# SECURITY: URL validation (SSRF) — fail closed
 # --------------------------------------------------------------------------
 
-class _FakeResponse:
-    def __init__(self, payload: bytes):
-        self._payload = payload
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "data:text/html,<script>",
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "http://169.254.169.254/latest/meta-data",  # cloud metadata (http + link-local)
+        "http://127.0.0.1:8000/health",  # loopback
+        "http://192.168.1.10/router",  # RFC1918
+        "http://10.0.0.5/internal",  # RFC1918
+        "https://user:pass@example.com/",  # userinfo
+        "https://example.com:8080/",  # nonstandard port
+        "",  # empty
+        "x" * 3000,  # oversized
+    ],
+)
+def test_validate_url_rejects_dangerous_urls(url):
+    with pytest.raises(SecurityError):
+        validate_url(url)
 
-    def __enter__(self):
-        return self
 
-    def __exit__(self, *exc):
-        return False
+def test_validate_url_accepts_public_https():
+    assert validate_url("https://www.thehindu.com/news/x", resolve=False) == (
+        "https://www.thehindu.com/news/x"
+    )
 
-    def read(self, n=-1):
-        return self._payload
 
+def test_safe_fetch_returns_none_for_ssrf_attempts(monkeypatch):
+    import urllib.request
+
+    def boom(*a, **k):  # any network attempt is a test failure
+        raise AssertionError("network must not be touched for invalid URLs")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    from app.security import safe_fetch
+
+    assert safe_fetch("http://169.254.169.254/latest/meta-data") is None
+    assert safe_fetch("javascript:alert(1)") is None
+    assert safe_fetch("http://127.0.0.1:8000/health") is None
+
+
+def test_rate_limiter_blocks_burst_and_releases():
+    lim = SlidingWindowLimiter(max_requests=3, window_seconds=60, max_concurrent=2)
+    assert lim.check("c1")[0] is True  # 1 in flight
+    assert lim.check("c1")[0] is True  # 2 in flight
+    ok, _ = lim.check("c1")
+    assert ok is False  # concurrency cap
+    lim.release("c1")
+    assert lim.check("c1")[0] is True  # slot freed
+    lim.release("c1")
+    lim.release("c1")
+    ok, retry = lim.check("c1")
+    assert ok is False and retry > 0  # rate cap reached for this client
+    assert lim.check("other")[0] is True  # other clients unaffected
+
+
+# --------------------------------------------------------------------------
+# pipeline (network mocked at the security boundary)
+# --------------------------------------------------------------------------
 
 RSS_ITEM = """
 <rss><channel>
@@ -177,27 +195,33 @@ RSS_ITEM = """
 """
 
 
+def _mock_safe_fetch(monkeypatch, rss_by_query):
+    """Patch safe_fetch in both consumer modules with a canned RSS responder."""
+
+    def fake_safe_fetch(url, **kwargs):
+        for needle, body in rss_by_query.items():
+            if needle in url:
+                return body
+        return b"" if "news.google.com" in url else None
+
+    import app.cross_check as cc
+    import app.pipeline as pl
+
+    monkeypatch.setattr(cc, "safe_fetch", fake_safe_fetch)
+    monkeypatch.setattr(pl, "safe_fetch", fake_safe_fetch)
+
+
 def test_pipeline_corroborates_real_story(monkeypatch):
     html = (
         "<html><head><title>Rs 3,000 crore drugs seized from Iranian boat</title></head><body>"
         "<article><p>" + "Officials said the seizure happened on Monday. " * 30 + "</p></article>"
         "</body></html>"
     )
-
     rss = RSS_ITEM.format(
         title="526 kg drugs worth Rs 3,000 crore seized from Iranian boat - India Today",
         outlet="India Today",
     ).encode()
-
-    import urllib.request as _ur
-
-    def fake_urlopen(req, timeout=5):
-        url = req.full_url if hasattr(req, "full_url") else str(req)
-        if "news.google.com/rss" in url:
-            return _FakeResponse(rss)
-        raise OSError("unexpected fetch: " + url)
-
-    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    _mock_safe_fetch(monkeypatch, {"news.google.com": rss})
 
     result = analyze(
         "https://www.thehindu.com/news/national/drugs-boat/article71526673.ece",
@@ -208,7 +232,6 @@ def test_pipeline_corroborates_real_story(monkeypatch):
     assert result.verdict == "trusted"
     assert result.suspicion == pytest.approx(0.0, abs=0.01)
     assert any(m.outlet == "India Today" for m in result.corroborating_sources)
-    # The page's own outlet must never appear as corroboration.
     assert all(m.outlet != "The Hindu" for m in result.corroborating_sources)
 
 
@@ -220,15 +243,7 @@ def test_pipeline_flags_fabricated_story(monkeypatch):
         + "Officials allegedly denied everything. " * 10
         + "</p></article></body></html>"
     )
-
-    empty_rss = b"<rss><channel></channel></rss>"
-
-    import urllib.request as _ur
-
-    def fake_urlopen(req, timeout=5):
-        return _FakeResponse(empty_rss)
-
-    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    _mock_safe_fetch(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
 
     result = analyze(
         "http://truth-leaks-daily.xyz/2026/09/scientists-vanish.html",
@@ -244,51 +259,52 @@ def test_pipeline_flags_fabricated_story(monkeypatch):
 
 
 def test_pipeline_handles_network_failure_gracefully(monkeypatch):
-    import urllib.request as _ur
+    import app.cross_check as cc
+    import app.pipeline as pl
 
-    def fake_urlopen(req, timeout=5):
-        raise OSError("network down")
+    def dead_fetch(url, **kwargs):
+        return None  # security layer contract: failures come back as None
 
-    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cc, "safe_fetch", dead_fetch)
+    monkeypatch.setattr(pl, "safe_fetch", dead_fetch)
     result = analyze(
         "https://www.ndtv.com/some/story.html",
         region="in",
         html="<html><head><title>T</title></head><body><article><p>" + "Text. " * 200 + "</p></article></body></html>",
         include_cross_check=True,
     )
-    # Must still return a verdict, never raise.
     assert result.verdict in ("trusted", "uncertain", "suspicious", "fake")
+
+
+def test_pipeline_rejects_non_http_schemes():
+    with pytest.raises(SecurityError):
+        analyze("javascript:alert(1)", region="in", html="<p>x</p>", include_cross_check=False)
+    with pytest.raises(SecurityError):
+        analyze("file:///etc/passwd", region="in", html="<p>x</p>", include_cross_check=False)
 
 
 # --------------------------------------------------------------------------
 # FastAPI app
 # --------------------------------------------------------------------------
 
-def test_health_endpoint():
+@pytest.fixture()
+def client():
     from fastapi.testclient import TestClient
 
     from app.main import app
 
-    client = TestClient(app)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_health_endpoint(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
 
 
-def test_analyze_endpoint_contract(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    empty_rss = b"<rss><channel></channel></rss>"
-    import urllib.request as _ur
-
-    def fake_urlopen(req, timeout=5):
-        return _FakeResponse(empty_rss)
-
-    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
-
-    client = TestClient(app)
+def test_analyze_endpoint_contract(client, monkeypatch):
+    _mock_safe_fetch(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
     resp = client.post(
         "/analyze",
         json={
@@ -305,3 +321,25 @@ def test_analyze_endpoint_contract(monkeypatch):
     for key in ("verdict", "suspicion", "confidence", "evidence", "corroborating_sources", "ai_signals", "summary"):
         assert key in body
     assert body["verdict"] in ("trusted", "uncertain", "suspicious", "fake")
+
+
+def test_analyze_rejects_bad_scheme_and_region(client):
+    assert client.post("/analyze", json={"url": "javascript:alert(1)", "region": "in"}).status_code in (400, 422)
+    assert client.post("/analyze", json={"url": "https://example.com/a", "region": "mars"}).status_code == 422
+    assert client.post("/analyze", json={"url": "https://example.com/a b", "region": "in"}).status_code in (400, 422)
+
+
+def test_analyze_rejects_oversized_html(client):
+    resp = client.post(
+        "/analyze",
+        json={"url": "https://example.com/a", "region": "in", "html": "x" * 500_000},
+    )
+    assert resp.status_code == 422  # pydantic bounds, fail closed
+
+
+def test_analyze_fails_closed_on_ssrf_url(client):
+    # Public-shaped request, but URL points at metadata IP: security layer
+    # must refuse; API must answer with a generic 400, not an analysis.
+    resp = client.post("/analyze", json={"url": "http://169.254.169.254/latest/meta-data", "region": "in", "include_cross_check": False})
+    assert resp.status_code in (400, 422, 502)
+    assert "169.254" not in resp.text

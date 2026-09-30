@@ -1,37 +1,62 @@
 // Popup logic: show verdict for the active tab via the background relay
 // (one fetch path for the whole extension), allow manual re-check.
+//
+// SECURITY: backend responses are untrusted data, not markup — rendered via
+// textContent only; no innerHTML anywhere in this file.
 
 const statusEl = document.getElementById("status");
 
-function labelFor(v) {
-  return {
-    fake: "❌ Likely FAKE / AI-generated",
-    suspicious: "⚠️ Suspicious",
-    uncertain: "❓ Uncertain",
-    trusted: "✅ No fake-news signals found",
-  }[v] || v;
-}
+const VERDICT_LABELS = {
+  fake: "❌ Likely FAKE / AI-generated",
+  suspicious: "⚠️ Suspicious",
+  uncertain: "❓ Uncertain",
+  trusted: "✅ No fake-news signals found",
+};
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+function el(tag, style, text) {
+  const node = document.createElement(tag);
+  if (style) node.setAttribute("style", style);
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
 function render(result) {
-  const stars = Math.round((result.confidence || 0) * 5);
-  statusEl.innerHTML = `
-    <div class="verdict ${result.verdict}">${labelFor(result.verdict)}</div>
-    <div>Suspicion ${(result.suspicion * 100).toFixed(0)}% ·
-         confidence ${"★".repeat(stars)}${"☆".repeat(5 - stars)}</div>
-    <div style="margin-top:6px">${escapeHtml(result.summary || "")}</div>
-    ${(result.corroborating_sources || []).length
-      ? `<div style="margin-top:6px">Corroborated by: ${result.corroborating_sources
-          .slice(0, 3)
-          .map((m) => escapeHtml(m.outlet))
-          .join(", ")}</div>`
-      : ""}
-  `;
+  // Shape-validate before rendering; drop anything unexpected.
+  if (!result || !VERDICT_LABELS[result.verdict]) return;
+  const suspicion = Number(result.suspicion);
+  const confidence = Number(result.confidence);
+  if (!Number.isFinite(suspicion) || !Number.isFinite(confidence)) return;
+
+  statusEl.textContent = "";
+  const stars = Math.max(0, Math.min(5, Math.round(confidence * 5)));
+
+  statusEl.appendChild(
+    el("div", "font-weight:700", VERDICT_LABELS[result.verdict])
+  );
+  statusEl.appendChild(
+    el(
+      "div",
+      "",
+      `Suspicion ${(suspicion * 100).toFixed(0)}% · confidence ${"★".repeat(stars)}${"☆".repeat(5 - stars)}`
+    )
+  );
+  if (typeof result.summary === "string" && result.summary) {
+    statusEl.appendChild(el("div", "margin-top:6px", result.summary.slice(0, 400)));
+  }
+  const sources = Array.isArray(result.corroborating_sources)
+    ? result.corroborating_sources
+        .filter((m) => m && typeof m.outlet === "string" && typeof m.url === "string" && /^https:\/\//i.test(m.url))
+        .slice(0, 3)
+    : [];
+  if (sources.length) {
+    statusEl.appendChild(
+      el(
+        "div",
+        "margin-top:6px",
+        "Corroborated by: " + sources.map((m) => m.outlet.slice(0, 80)).join(", ")
+      )
+    );
+  }
 }
 
 async function analyzeActiveTab(triggerBanner) {
@@ -41,11 +66,9 @@ async function analyzeActiveTab(triggerBanner) {
     statusEl.textContent = "No active page to check.";
     return;
   }
-  // Trigger the on-page banner too (only when the content script is present).
   if (triggerBanner && tab.id) {
     chrome.tabs.sendMessage(tab.id, { type: "VERITAS_ANALYZE" }, () => void chrome.runtime.lastError);
   }
-  // Verdict for the popup itself goes through the background worker.
   chrome.runtime.sendMessage({ type: "VERITAS_FETCH", payload: { url: tab.url } }, (res) => {
     if (chrome.runtime.lastError || !res || res.error) {
       statusEl.textContent =

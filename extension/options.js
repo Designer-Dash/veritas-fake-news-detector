@@ -16,11 +16,22 @@ chrome.storage.sync.get(
 );
 
 els.save.addEventListener("click", () => {
+  // Validate before persisting: only http(s) URLs are ever allowed as the
+  // backend (the background worker re-validates on every use — this is UX).
+  let backend = els.backend.value.trim().replace(/\/+$/, "");
+  try {
+    const parsed = new URL(backend);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error();
+  } catch {
+    els.saved.textContent = "Invalid backend URL (must start with http:// or https://)";
+    return;
+  }
+  const region = ["in", "us", "uk", "global"].includes(els.region.value) ? els.region.value : "in";
   chrome.storage.sync.set(
     {
-      region: els.region.value,
-      backend: els.backend.value.replace(/\/$/, ""),
-      autoCheck: els.autoCheck.checked,
+      region,
+      backend,
+      autoCheck: !!els.autoCheck.checked,
     },
     () => {
       els.saved.textContent = "Saved ✓";

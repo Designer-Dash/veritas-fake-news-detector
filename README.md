@@ -107,6 +107,47 @@ separately (see the live-test reports in the project history).
    WebExtensions APIs.
 6. **Report-back loop** — let users flag missed fakes; store labels for retraining.
 
+## Security & privacy
+
+**Permissions (least privilege).** `storage` (settings only), `activeTab` (read the
+active tab URL on explicit popup use — avoids the broad `tabs` permission), and
+host permissions for `http://localhost/*` + `http://127.0.0.1/*` so the service
+worker can reach the dev backend. No `tabs`, `cookies`, `history`, `webRequest`,
+`downloads`, `bookmarks`, no `<all_urls>`, no remote code, no eval.
+
+**Untrusted content handling.** Webpage text is data, never instructions. The
+banner renders exclusively via `textContent` in a **closed Shadow DOM** (page
+JS/CSS cannot read or restyle it); zero `innerHTML` in the extension. URLs from
+the backend are rendered only after an https-only allowlist check.
+
+**Data minimization.** The extension uploads only the extracted article text
+(capped at 400 KB server-side) — never the full DOM, so passwords/tokens on the
+page are never transmitted. Backend responses are relayed to the UI through a
+fixed field whitelist.
+
+**SSRF defense (backend).** Every server-side fetch — page, RSS, image — goes
+through `app/security.py`: https-only scheme allowlist, port allowlist, no
+userinfo, DNS-resolved IPs must be globally public (blocks localhost, RFC1918,
+link-local, cloud metadata), redirects re-validated per hop, hard size caps and
+timeouts. Invalid input **fails closed** (generic 400s, no internal details).
+
+**Abuse protection (backend).** Per-client sliding-window rate limit +
+concurrency cap (env-tunable: `VERITAS_RATE_MAX`, `VERITAS_RATE_WINDOW_SEC`,
+`VERITAS_MAX_CONCURRENT`), request bounds via pydantic, CORS restricted to the
+extension origin via `VERITAS_EXTENSION_ID` (empty = same-origin only).
+
+**Secrets.** None in the repo or the extension; the architecture keeps all
+analysis server-side so future AI-provider keys never ship to clients.
+
+### Production hardening checklist
+
+- Serve the backend over **HTTPS** with a real domain (update extension host
+  permissions accordingly) and add **authentication** (per-user API keys/OAuth)
+  — the local endpoint is unauthenticated by design for development.
+- Set `VERITAS_EXTENSION_ID` to your published extension's ID to lock CORS.
+- The in-memory rate limiter is per-process; use Redis for multi-instance
+  deployments.
+
 ## Notes & limits (v0.1)
 
 - The AI-watermark checks are metadata/byte-marker based: they catch *declared*

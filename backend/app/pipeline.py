@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from .ai_signals import scan_bytes, scan_html_for_media_flags, score_media_signals
 from .cross_check import links_to_trusted, search_trusted_coverage
 from .domain import AnalysisResult, Evidence, SourceMatch, verdict_from_suspicion
+from .security import SecurityError, fetch_media_head, safe_fetch, validate_url
 from .sources import outlets_for_region
 from .text_analysis import (
     CLICKBAIT_PATTERNS,
@@ -62,40 +63,12 @@ def domain_reputation(domain: str) -> Dict[str, Any]:
 
 
 def fetch_page(url: str, timeout: int = 8) -> Optional[bytes]:
-    import urllib.request
+    """Fetch a page through the centralized SSRF-guarded fetcher.
 
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.read(1_500_000)
-    except Exception:
-        return None
-
-
-def fetch_media_head(url: str, max_bytes: int = 262_144, timeout: int = 6) -> Optional[bytes]:
-    """Download only the first `max_bytes` of an image.
-
-    C2PA manifests, EXIF/XMP and SynthID-style markers live in the header
-    region of JPEG/PNG/WebP files, so a Range request is enough for
-    provenance scanning -- typically 10-100x less transfer than the full file.
-    Falls back to a full download (truncated) if the server ignores Range.
+    Returns None on any validation or network failure; callers must treat
+    that as "content unavailable", not "content is clean".
     """
-    import urllib.request
-
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)",
-            "Range": f"bytes=0-{max_bytes - 1}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.read(max_bytes)
-    except Exception:
-        return None
+    return safe_fetch(url, timeout=timeout)
 
 
 def find_lead_image_url(html: str) -> Optional[str]:
@@ -114,6 +87,15 @@ def analyze(
 ) -> AnalysisResult:
     """Full analysis of a news page. `html` may be supplied by the extension
     (content script DOM snapshot) to avoid a refetch; otherwise we fetch it."""
+
+    # Fail closed on malformed/unsupported page URLs (defense in depth -- the
+    # API layer validates too; this protects direct callers of analyze()).
+    # Shape-level validation: scheme, host/port/userinfo, and literal-IP
+    # checks (metadata/loopback/RFC1918 rejected). DNS resolution is skipped
+    # here; the actual fetch re-validates fully inside safe_fetch().
+    if not isinstance(url, str) or len(url) > 2048:
+        raise SecurityError("analyze: invalid url")
+    validate_url(url, allow_http=True, resolve=False, context="analyze")
 
     dom = domain_of(url)
     if html is None:

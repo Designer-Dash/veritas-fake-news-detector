@@ -24,6 +24,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
+from .security import safe_fetch
 from .sources import outlets_for_region, region_name
 
 USER_AGENT = (
@@ -167,12 +168,8 @@ def _google_news_url(query: str, region: str) -> str:
 
 
 def _fetch(url: str, timeout: int = TIMEOUT) -> Optional[bytes]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.read(2_000_000)
-    except Exception:
-        return None
+    """All cross-check fetches go through the SSRF-guarded security layer."""
+    return safe_fetch(url, timeout=timeout)
 
 
 def _parse_rss_items(rss: Optional[bytes], limit: int) -> List[Dict[str, str]]:
