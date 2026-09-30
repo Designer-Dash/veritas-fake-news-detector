@@ -12,16 +12,15 @@ Design (see README "Security & privacy"):
          (hex hash of the *full* key string, incl. the ``vfnd_`` prefix).
       2. ``VERITAS_KEY_DB`` JSON file (default ``<project>/data/api_keys.json``),
          managed by ``tools/manage_keys.py``; mode 0600 enforced where possible.
-  * Verification is constant-time (``hmac.compare_digest``) and the file
-    registry hot-reloads on mtime change, so revocation takes effect without
-    a restart.
+  * Verification is a direct lookup on a map keyed by SHA-256 hash -- no
+    plaintext comparison ever occurs; the file registry hot-reloads on
+    mtime change, so revocation takes effect without a restart.
   * Rate limits are per **key id** (not IP) with optional per-key overrides.
 """
 
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import secrets
