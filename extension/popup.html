@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: system-ui, sans-serif; width: 280px; margin: 0; padding: 14px; }
+      h1 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 6px; align-items: center; }
+      #status { font-size: 13px; line-height: 1.5; min-height: 40px; }
+      button { width: 100%; padding: 8px; border: 0; border-radius: 8px; background: #1a237e;
+               color: #fff; font-size: 13px; cursor: pointer; margin-top: 10px; }
+      button.secondary { background: #eceff1; color: #263238; }
+      .verdict { font-weight: 700; }
+      .fake { color: #b3261e; }
+      .suspicious { color: #e65100; }
+      .uncertain { color: #f9a825; }
+      .trusted { color: #2e7d32; }
+    </style>
+  </head>
+  <body>
+    <h1>🛡️ Veritas</h1>
+    <div id="status">Checking this page…</div>
+    <button id="recheck">Re-check this page</button>
+    <button id="settings" class="secondary">Settings</button>
+    <script src="popup.js"></script>
+  </body>
+</html>

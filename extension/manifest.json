@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Veritas — Fake & AI News Detector",
+  "version": "0.1.0",
+  "description": "Detects fake / AI-generated news pages as you browse. Checks AI watermarks, provenance metadata (C2PA/SynthID cues) and cross-checks trusted regional outlets like India Today, TOI, The Hindu, Reuters and AP.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Veritas — check this page"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {}
+}
