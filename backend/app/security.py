@@ -199,6 +199,8 @@ def fetch_media_head(
 # ---------------------------------------------------------------------------
 
 class SlidingWindowLimiter:
+    _EVICTION_INTERVAL = 100  # stale-key eviction cadence (check() calls)
+
     def __init__(self, max_requests: int, window_seconds: float, max_concurrent: int = 4):
         self.max_requests = max_requests
         self.window = window_seconds
@@ -206,10 +208,28 @@ class SlidingWindowLimiter:
         self._hits: Dict[str, List[float]] = {}
         self._inflight: Dict[str, int] = {}
         self._lock = threading.Lock()
+        self._checks_since_evict = 0
+
+    def _evict_stale(self, now: float) -> None:
+        """Drop keys whose every hit is outside the window and which hold no
+        in-flight slots. Must be called while holding self._lock."""
+        stale = [
+            key
+            for key, hits in self._hits.items()
+            if self._inflight.get(key, 0) == 0
+            and all(now - t >= self.window for t in hits)
+        ]
+        for key in stale:
+            del self._hits[key]
+            self._inflight.pop(key, None)
 
     def check(self, key: str) -> Tuple[bool, float]:
         now = time.monotonic()
         with self._lock:
+            self._checks_since_evict += 1
+            if self._checks_since_evict >= self._EVICTION_INTERVAL:
+                self._checks_since_evict = 0
+                self._evict_stale(now)
             hits = [t for t in self._hits.get(key, []) if now - t < self.window]
             # Concurrency rejection must not consume rate budget, or retries
             # compound the penalty on the client.

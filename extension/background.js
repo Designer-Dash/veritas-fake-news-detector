@@ -103,11 +103,12 @@ async function handleFetch(payloadRaw, sendResponse) {
       verdict: typeof data.verdict === "string" ? data.verdict : "uncertain",
       suspicion: typeof data.suspicion === "number" ? data.suspicion : 0.5,
       confidence: typeof data.confidence === "number" ? data.confidence : 0.5,
+      summary: typeof data.summary === "string" ? data.summary.slice(0, 400) : "",
       reason,
       sources_checked: typeof data.ai_signals?.cross_check?.checked === "number"
         ? data.ai_signals.cross_check.checked
         : 0,
-      corroborating: Array.isArray(data.corroborating_sources)
+      corroborating_sources: Array.isArray(data.corroborating_sources)
         ? data.corroborating_sources.slice(0, 3).map((m) => ({
             outlet: typeof m.outlet === "string" ? m.outlet.slice(0, 80) : "",
             url: typeof m.url === "string" && /^https:\/\//i.test(m.url) ? m.url : "",

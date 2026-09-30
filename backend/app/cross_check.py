@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from .security import safe_fetch
 from .sources import outlets_for_region, region_name
+from .text_analysis import extract_text_from_html
 
 USER_AGENT = (
     "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)"
@@ -160,7 +161,7 @@ def _registrable(host: str) -> str:
 def _google_news_url(query: str, region: str) -> str:
     lang_country = {"in": "en-IN", "us": "en-US", "uk": "en-GB"}.get(region, "en-IN")
     gl = region.upper() if len(region) == 2 else "IN"
-    ceid = f"{region}:{'en' if region == 'in' else 'en'}"
+    ceid = f"{region}:en"
     params = {"hl": lang_country, "gl": gl, "ceid": ceid}
     return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
         {"q": query, **params}
@@ -239,8 +240,6 @@ def search_trusted_coverage(
             if link and "news.google.com" not in link:
                 body = _fetch(link)
                 if body:
-                    from .text_analysis import extract_text_from_html
-
                     body_sim = jaccard(
                         _shingles(extract_text_from_html(body.decode("utf-8", errors="ignore"))),
                         _shingles(headline),

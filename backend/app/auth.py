@@ -155,12 +155,9 @@ class KeyRegistry:
             return None
         presented_hash = hash_key(presented_key)
         self.reload()
-        # The registry is keyed by hash; compare_digest guards against any
-        # future transition to non-hash-indexed comparison paths.
-        for sha, ctx in list(self._by_hash.items()):
-            if hmac.compare_digest(sha, presented_hash):
-                return ctx
-        return None
+        # Registry is keyed by SHA-256 hash; a dict lookup on the presented
+        # key's hash is constant-ish time and never compares plaintext.
+        return self._by_hash.get(presented_hash)
 
 
 _default_registry: Optional[KeyRegistry] = None

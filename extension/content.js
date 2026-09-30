@@ -153,8 +153,8 @@ function renderBadge(result) {
   const sourcesChecked = Number.isFinite(Number(result.sources_checked))
     ? Math.max(0, Math.min(99, Number(result.sources_checked)))
     : 0;
-  const corroborating = Array.isArray(result.corroborating)
-    ? result.corroborating.filter((m) => m && typeof m.url === "string" && /^https:\/\//i.test(m.url))
+  const corroborating = Array.isArray(result.corroborating_sources)
+    ? result.corroborating_sources.filter((m) => m && typeof m.url === "string" && /^https:\/\//i.test(m.url))
     : [];
 
   const host = document.createElement("div");

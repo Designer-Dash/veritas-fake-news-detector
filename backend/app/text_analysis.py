@@ -84,11 +84,24 @@ def burstiness(text: str) -> float:
     return min(cv / 0.8, 1.0)
 
 
-def type_token_ratio(text: str) -> float:
+def type_token_ratio(text: str, window: int = 100) -> float:
+    """Moving-average type-token ratio (MATTR).
+
+    Raw TTR is length-biased: longer texts always score lower even when
+    vocabulary richness is identical. MATTR slides a fixed `window` across
+    the token stream and averages per-window TTR, making scores comparable
+    across article lengths. Falls back to raw TTR below one window.
+    """
     words = [w.lower() for w in _words(text)]
     if not words:
         return 0.5
-    return len(set(words)) / len(words)
+    if len(words) <= window:
+        return len(set(words)) / len(words)
+    ttrs = []
+    for i in range(0, len(words) - window + 1):
+        win = words[i : i + window]
+        ttrs.append(len(set(win)) / window)
+    return sum(ttrs) / len(ttrs)
 
 
 def punctuation_diversity(text: str) -> float:

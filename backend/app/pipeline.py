@@ -31,7 +31,11 @@ KNOWN_TRUSTED_PATTERNS = (
 )
 
 # Brand-impersonation tricks: lookalike TLDs and misleading hyphens.
-LOOKALIKE_TLDS = (".co.in.", ".com.co", ".co.uk.", ".net.", ".org.", ".news", ".live", ".xyz")
+# Single source of truth for domain_reputation(); entries like ".com.co"
+# and ".co.in.biz" are the classic fake-outlet pattern (abcnews.com.co).
+# Deliberately EXCLUDES .org/.net so trusted outlets (npr.org, wpxi.com)
+# are never penalized.
+LOOKALIKE_TLDS = (".com.co", ".co.in.biz", ".news", ".live", ".xyz", ".top", ".buzz")
 SUSPICIOUS_NAME_PARTS = ("blog", "wp", "wordpress", "blogger", "free", "fun", "clip", "buzz")
 
 
@@ -50,7 +54,7 @@ def domain_reputation(domain: str) -> Dict[str, Any]:
     if any(p in d for p in KNOWN_TRUSTED_PATTERNS):
         weight -= 0.25
         reasons.append("Well-known editorial outlet")
-    if d.endswith((".com.co", ".co.in.biz", ".news", ".live", ".xyz", ".top", ".buzz")):
+    if d.endswith(LOOKALIKE_TLDS):
         weight += 0.2
         reasons.append("Lookalike/Trend TLD often used by content farms")
     if any(part in d for part in SUSPICIOUS_NAME_PARTS) and "news" in d:
