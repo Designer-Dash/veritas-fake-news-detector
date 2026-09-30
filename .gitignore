@@ -6,3 +6,4 @@ uvicorn.log
 *.pem
 *.key
 secrets*
+data/

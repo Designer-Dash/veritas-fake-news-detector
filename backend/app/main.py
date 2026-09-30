@@ -1,13 +1,14 @@
 """FastAPI app exposing POST /analyze and GET /health for the extension.
 
 Security posture:
+  * Per-user API-key auth (Bearer) with SHA-256 hashed key storage; ON by
+    default, explicit dev opt-out via VERITAS_AUTH_DISABLED=1.
+  * Rate limits keyed by authenticated identity (key id), with per-key
+    overrides; unauthenticated dev mode falls back to client IP.
   * Every request field is length- and content-bounded (pydantic).
-  * Per-client rate limiting (sliding window + concurrency cap).
-  * CORS restricted to the extension's own origins (chrome-extension://).
+  * CORS restricted to the extension's own origin (VERITAS_EXTENSION_ID).
   * URLs are validated by the centralized security layer; invalid URLs fail
     closed with a generic 4xx (no internal details leak).
-  * Unknown errors return a generic message; details stay in server logs
-    (without page content or credentials).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from .auth import auth_enabled, get_registry
 from .pipeline import analyze
 from .security import SecurityError, SlidingWindowLimiter, client_key
 
@@ -39,16 +41,34 @@ app.add_middleware(
     allow_origins=_allowed_origins,  # empty = same-origin only until configured
     allow_credentials=False,
     allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
     max_age=600,
 )
 
-# Abuse protection: per-client (identity or IP) sliding window.
-_limiter = SlidingWindowLimiter(
+# Abuse protection: default per-identity limits; per-key overrides come from
+# the key registry (AuthContext.rate_max).
+_default_limiter = SlidingWindowLimiter(
     max_requests=int(os.environ.get("VERITAS_RATE_MAX", "30")),
     window_seconds=float(os.environ.get("VERITAS_RATE_WINDOW_SEC", "60")),
     max_concurrent=int(os.environ.get("VERITAS_MAX_CONCURRENT", "4")),
 )
+# Per-key limiters are created lazily and cached by (key_id, rate_max).
+_key_limiters: dict = {}
+_LIMIT_WINDOW = float(os.environ.get("VERITAS_RATE_WINDOW_SEC", "60"))
+_LIMIT_CONCURRENT = int(os.environ.get("VERITAS_MAX_CONCURRENT", "4"))
+
+
+def _limiter_for(rate_max: Optional[int]) -> SlidingWindowLimiter:
+    if rate_max is None:
+        return _default_limiter
+    lim = _key_limiters.get(rate_max)
+    if lim is None:
+        lim = SlidingWindowLimiter(
+            max_requests=rate_max, window_seconds=_LIMIT_WINDOW, max_concurrent=_LIMIT_CONCURRENT
+        )
+        _key_limiters[rate_max] = lim
+    return lim
+
 
 MAX_HTML_BYTES = 400_000
 
@@ -91,13 +111,32 @@ def health() -> dict:
     return {"status": "ok", "version": app.version}
 
 
+def _authenticate(request: Request):
+    """Return (key_id, rate_max, limiter_key). Raises 401 when auth is on."""
+    if not auth_enabled():
+        ip = request.client.host if request.client else "unknown"
+        return "anon", None, client_key(ip)
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="authentication required")
+    presented = auth[len("Bearer "):].strip()
+    # Never log `presented`.
+    ctx = get_registry().verify(presented)
+    if ctx is None:
+        # Small delay muddies timing-based probing of unknown keys.
+        import time
+
+        time.sleep(0.05)
+        raise HTTPException(status_code=401, detail="authentication required")
+    return ctx.key_id, ctx.rate_max, f"user:{ctx.key_id}"
+
+
 @app.post("/analyze")
 def analyze_endpoint(req: AnalyzeRequest, request: Request):
-    key = client_key(
-        request.client.host if request.client else "unknown",
-        api_key_hash="",  # no auth in local/dev mode; see README auth section
-    )
-    allowed, _retry = _limiter.check(key)
+    key_id, rate_max, limiter_key = _authenticate(request)
+    limiter = _limiter_for(rate_max)
+    allowed, _retry = limiter.check(limiter_key)
     if not allowed:
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     try:
@@ -112,8 +151,8 @@ def analyze_endpoint(req: AnalyzeRequest, request: Request):
     except SecurityError:
         raise HTTPException(status_code=400, detail="invalid request")
     except Exception:
-        # Log server-side without page content; return a generic error.
-        logger.exception("analyze failed")  # traceback stays in server logs
+        # Log server-side without page content or credentials; generic error out.
+        logger.exception("analyze failed for %s", key_id)
         raise HTTPException(status_code=502, detail="analysis failed")
     finally:
-        _limiter.release(key)
+        limiter.release(limiter_key)

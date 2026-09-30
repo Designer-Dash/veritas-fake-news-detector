@@ -287,6 +287,13 @@ def test_pipeline_rejects_non_http_schemes():
 # FastAPI app
 # --------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _api_auth_off(monkeypatch):
+    """API-contract tests run in dev mode (auth off); auth has its own suite
+    in test_auth.py which enables it explicitly."""
+    monkeypatch.setenv("VERITAS_AUTH_DISABLED", "1")
+
+
 @pytest.fixture()
 def client():
     from fastapi.testclient import TestClient

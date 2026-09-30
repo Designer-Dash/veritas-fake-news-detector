@@ -12,6 +12,8 @@
 // request destination (backend base URL comes only from chrome.storage).
 
 const DEFAULTS = { backend: "http://localhost:8000", region: "in", autoCheck: true };
+// storage.local defaults (credentials are NOT part of synced settings).
+const LOCAL_DEFAULTS = { apiKey: "" };
 
 const VALID_REGIONS = new Set(["in", "us", "uk", "global"]);
 
@@ -58,11 +60,26 @@ async function handleFetch(payloadRaw, sendResponse) {
       sendResponse({ error: "invalid payload" });
       return;
     }
+    // The API key is a credential: read from storage.local (never synced),
+    // sent only to the configured backend, never logged.
+    const { apiKey } = await chrome.storage.local.get({ apiKey: "" });
+    const headers = { "Content-Type": "application/json" };
+    if (apiKey && /^vfnd_[A-Za-z0-9_-]{20,80}$/.test(apiKey)) {
+      headers["Authorization"] = "Bearer " + apiKey;
+    }
     const res = await fetch(cfg.backend.replace(/\/$/, "") + "/analyze", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
+    if (res.status === 401) {
+      sendResponse({ error: "Authentication failed — check your API key in Veritas settings." });
+      return;
+    }
+    if (res.status === 429) {
+      sendResponse({ error: "Rate limit reached — try again in a minute." });
+      return;
+    }
     if (!res.ok) throw new Error("backend responded " + res.status);
     const data = await res.json();
     // Relay only the fields the banner/popup need (response minimization).

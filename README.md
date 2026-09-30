@@ -142,11 +142,47 @@ analysis server-side so future AI-provider keys never ship to clients.
 ### Production hardening checklist
 
 - Serve the backend over **HTTPS** with a real domain (update extension host
-  permissions accordingly) and add **authentication** (per-user API keys/OAuth)
-  — the local endpoint is unauthenticated by design for development.
+  permissions accordingly).
 - Set `VERITAS_EXTENSION_ID` to your published extension's ID to lock CORS.
 - The in-memory rate limiter is per-process; use Redis for multi-instance
   deployments.
+
+### Authentication (API keys)
+
+Auth is **on by default**; local development opts out with
+`VERITAS_AUTH_DISABLED=1` (the default dev server command in this README does
+this so the extension works out of the box).
+
+```bash
+# create a key (plaintext shown once; only SHA-256 hash is stored)
+cd backend
+python tools/manage_keys.py create --name my-laptop --rate-max 60
+python tools/manage_keys.py list
+python tools/manage_keys.py revoke --key-id k_xxxxxxxx
+```
+
+- Keys look like `vfnd_<43 chars>`; the registry lives in
+  `data/api_keys.json` (gitignored, mode 0600) and/or the `VERITAS_API_KEYS`
+  env var as `id:<sha256-hex>:rate_max` entries — **never** plaintext.
+- Verification is constant-time; the file registry hot-reloads, so
+  `revoke` takes effect immediately without a server restart.
+- Rate limits are keyed by **user** (`user:<key_id>`) with per-key
+  `--rate-max` overrides; unauthenticated dev mode falls back to client IP.
+- The extension stores the key in `chrome.storage.local` (never synced to
+  Google accounts), sends it as `Authorization: Bearer …` to the configured
+  backend only, and surfaces 401/429 as user-readable banner/popup errors.
+
+### HTTPS deployment
+
+```bash
+# behind a TLS-terminating reverse proxy (Caddy example)
+VERITAS_EXTENSION_ID=your_extension_id VERITAS_RATE_MAX=30 \
+  uvicorn app.main:app --host 0.0.0.0 --port 8443 --proxy-headers
+```
+
+Then point the extension's Backend URL at `https://api.yourdomain.org` and
+paste an API key in its settings. Rate-limit identities, CORS and the
+security layer need no changes.
 
 ## Notes & limits (v0.1)
 

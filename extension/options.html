@@ -28,6 +28,11 @@
     <input id="backend" type="url" placeholder="http://localhost:8000" />
     <div class="hint">Where the analysis API runs. Default: local dev server.</div>
 
+    <label for="apiKey">API key (optional)</label>
+    <input id="apiKey" type="password" placeholder="vfnd_…" autocomplete="off" />
+    <div class="hint">Required if the backend has authentication enabled. Stored locally on this
+      device only — never synced, never sent anywhere except your backend.</div>
+
     <label><input type="checkbox" id="autoCheck" style="width:auto" /> Auto-check pages that look like news</label>
 
     <button id="save">Save</button><span id="saved"></span>
