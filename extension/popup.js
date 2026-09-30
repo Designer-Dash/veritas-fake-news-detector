@@ -1,69 +1,96 @@
-// Popup logic: show verdict for the active tab via the background relay
-// (one fetch path for the whole extension), allow manual re-check.
-//
-// SECURITY: backend responses are untrusted data, not markup — rendered via
-// textContent only; no innerHTML anywhere in this file.
+// Popup logic — dark premium redesign. All backend-derived text is rendered
+// via textContent only; no innerHTML anywhere in this file.
 
-const statusEl = document.getElementById("status");
+const badgeEl = document.getElementById("badge");
+const meterFill = document.getElementById("meterFill");
+const summaryEl = document.getElementById("summary");
+const chipsEl = document.getElementById("chips");
+const recheckBtn = document.getElementById("recheck");
 
-const VERDICT_LABELS = {
-  fake: "🔴 Contradicted",
-  suspicious: "🟠 Misleading",
-  uncertain: "🟡 Unverified",
-  trusted: "🟢 Supported",
+// Fixed verdict metadata: badge copy + colors (never built from data).
+const VERDICT_META = {
+  trusted: { bg: "#22c55e", fg: "#052e16", text: "✓ Supported by trusted sources", meter: "#22c55e" },
+  uncertain: { bg: "#eab308", fg: "#1c1917", text: "? Unverified — no corroboration found", meter: "#eab308" },
+  suspicious: { bg: "#f97316", fg: "#1c1917", text: "⚠ Misleading signals detected", meter: "#f97316" },
+  fake: { bg: "#ef4444", fg: "#ffffff", text: "✕ Contradicted by trusted outlets", meter: "#ef4444" },
 };
 
-function el(tag, style, text) {
+function el(tag, cls, text) {
   const node = document.createElement(tag);
-  if (style) node.setAttribute("style", style);
+  if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
 }
 
+function showShimmer() {
+  summaryEl.textContent = "";
+  chipsEl.style.display = "none";
+  chipsEl.textContent = "";
+  meterFill.style.width = "0%";
+  badgeEl.textContent = "";
+  badgeEl.style.background = "#1e293b";
+  badgeEl.style.color = "#e2e8f0";
+  badgeEl.appendChild(el("div", "shimmer"));
+  badgeEl.appendChild(el("div", "shimmer"));
+  const third = el("div", "shimmer");
+  third.style.width = "60%";
+  badgeEl.appendChild(third);
+}
+
 function render(result) {
-  // Shape-validate before rendering; drop anything unexpected.
-  if (!result || !VERDICT_LABELS[result.verdict]) return;
+  // Shape-validate before rendering; drop anything unexpected (fail closed).
+  if (!result || !VERDICT_META[result.verdict]) {
+    applyError("unexpected response");
+    return;
+  }
   const suspicion = Number(result.suspicion);
   const confidence = Number(result.confidence);
-  if (!Number.isFinite(suspicion) || !Number.isFinite(confidence)) return;
-
-  statusEl.textContent = "";
-  const stars = Math.max(0, Math.min(5, Math.round(confidence * 5)));
-
-  statusEl.appendChild(
-    el("div", "font-weight:700", VERDICT_LABELS[result.verdict])
-  );
-  statusEl.appendChild(
-    el(
-      "div",
-      "",
-      `Suspicion ${(suspicion * 100).toFixed(0)}% · confidence ${"★".repeat(stars)}${"☆".repeat(5 - stars)}`
-    )
-  );
-  if (typeof result.summary === "string" && result.summary) {
-    statusEl.appendChild(el("div", "margin-top:6px", result.summary.slice(0, 400)));
+  if (!Number.isFinite(suspicion) || !Number.isFinite(confidence)) {
+    applyError("unexpected response");
+    return;
   }
+  const meta = VERDICT_META[result.verdict];
+
+  badgeEl.textContent = meta.text;
+  badgeEl.style.background = meta.bg;
+  badgeEl.style.color = meta.fg;
+
+  meterFill.style.width = `${Math.round(Math.min(Math.max(suspicion, 0), 1) * 100)}%`;
+  meterFill.style.background = meta.meter;
+
+  summaryEl.textContent = typeof result.summary === "string" ? result.summary.slice(0, 400) : "";
+
+  chipsEl.textContent = "";
   const sources = Array.isArray(result.corroborating_sources)
-    ? result.corroborating_sources
-        .filter((m) => m && typeof m.outlet === "string" && typeof m.url === "string" && /^https:\/\//i.test(m.url))
-        .slice(0, 3)
+    ? result.corroborating_sources.filter(
+        (m) => m && typeof m.outlet === "string" && typeof m.url === "string" && /^https:\/\//i.test(m.url)
+      )
     : [];
   if (sources.length) {
-    statusEl.appendChild(
-      el(
-        "div",
-        "margin-top:6px",
-        "Corroborated by: " + sources.map((m) => m.outlet.slice(0, 80)).join(", ")
-      )
-    );
+    chipsEl.style.display = "flex";
+    for (const m of sources.slice(0, 4)) {
+      chipsEl.appendChild(el("span", "chip", m.outlet.slice(0, 60)));
+    }
   }
 }
 
+function applyError(msg) {
+  badgeEl.textContent = "⚠ Backend unreachable";
+  badgeEl.style.background = "#78350f";
+  badgeEl.style.color = "#fde68a";
+  meterFill.style.width = "0%";
+  summaryEl.textContent =
+    msg && /auth/i.test(msg)
+      ? String(msg).slice(0, 200)
+      : "Start the backend server, then re-check. " + (msg ? `(${String(msg).slice(0, 120)})` : "");
+  chipsEl.style.display = "none";
+}
+
 async function analyzeActiveTab(triggerBanner) {
-  statusEl.textContent = "Checking this page…";
+  showShimmer();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) {
-    statusEl.textContent = "No active page to check.";
+    applyError("no active page");
     return;
   }
   if (triggerBanner && tab.id) {
@@ -71,14 +98,13 @@ async function analyzeActiveTab(triggerBanner) {
   }
   chrome.runtime.sendMessage({ type: "VERITAS_FETCH", payload: { url: tab.url } }, (res) => {
     if (chrome.runtime.lastError || !res || res.error) {
-      statusEl.textContent =
-        "Backend unreachable — is it running? " + ((res && res.error) || "");
+      applyError((res && res.error) || chrome.runtime.lastError);
       return;
     }
     render(res);
   });
 }
 
-document.getElementById("recheck").addEventListener("click", () => analyzeActiveTab(true));
+recheckBtn.addEventListener("click", () => analyzeActiveTab(true));
 document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 analyzeActiveTab(false);

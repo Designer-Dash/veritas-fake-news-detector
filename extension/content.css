@@ -1,3 +1,16 @@
-/* Veritas banner styles (kept minimal; most styling is inline). */
-#veritas-banner a { color: #ffe082; }
-#veritas-banner ul { list-style: disc; }
+/* Host-anchor styling only.
+ *
+ * The banner itself lives inside a CLOSED shadow root, so page-level CSS
+ * cannot reach it (by design). This file styles the outer #veritas-banner-host
+ * anchor element that the manifest injects on every page.
+ */
+
+#veritas-banner-host {
+  all: initial;
+  display: block;
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483646;
+  pointer-events: none;
+}

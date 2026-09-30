@@ -3,39 +3,138 @@
   <head>
     <meta charset="utf-8" />
     <style>
-      body { font-family: system-ui, sans-serif; max-width: 460px; margin: 24px auto; padding: 0 16px; }
-      h1 { font-size: 18px; }
-      label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }
-      select, input { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #cfd8dc; border-radius: 6px; font-size: 13px; }
-      button { margin-top: 16px; padding: 8px 16px; border: 0; border-radius: 8px; background: #1a237e; color: #fff; cursor: pointer; }
-      .hint { font-size: 12px; color: #607d8b; margin-top: 4px; }
-      #saved { color: #2e7d32; font-size: 13px; margin-left: 10px; }
+      * { box-sizing: border-box; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        background: #f1f5f9;
+      }
+      .wrap { display: flex; min-height: 100vh; }
+      /* Sidebar */
+      .sidebar {
+        width: 160px;
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 20px 14px;
+        flex: none;
+      }
+      .logo { font-size: 15px; font-weight: 700; color: #ffffff; }
+      .version {
+        display: inline-block;
+        margin-top: 6px;
+        background: #334155;
+        color: #94a3b8;
+        border-radius: 999px;
+        font-size: 11px;
+        padding: 2px 8px;
+      }
+      .nav { margin-top: 22px; display: flex; flex-direction: column; gap: 8px; }
+      .nav span { color: #64748b; font-size: 12.5px; cursor: default; }
+      /* Content card */
+      .content { flex: 1; padding: 32px; }
+      .card {
+        max-width: 520px;
+        background: #ffffff;
+        border-radius: 16px;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+        padding: 24px;
+      }
+      h1 { font-size: 18px; margin: 0 0 4px; color: #0f172a; }
+      .sub { color: #64748b; font-size: 12.5px; margin-bottom: 18px; }
+      label {
+        display: block;
+        font-weight: 600;
+        font-size: 13px;
+        color: #374151;
+        margin-top: 16px;
+      }
+      select, input {
+        width: 100%;
+        padding: 9px 10px;
+        margin-top: 5px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font-size: 13px;
+        color: #0f172a;
+        background: #ffffff;
+      }
+      select:focus, input:focus {
+        outline: 2px solid #6366f1;
+        outline-offset: 1px;
+      }
+      .hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+      .connrow { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12.5px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; flex: none; }
+      button {
+        margin-top: 20px;
+        width: 100%;
+        padding: 10px;
+        border: 0;
+        border-radius: 10px;
+        background: #6366f1;
+        color: #ffffff;
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: #4f46e5; }
+      .privacy {
+        margin-top: 18px;
+        background: #f8fafc;
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 12px;
+        color: #475569;
+        line-height: 1.5;
+      }
     </style>
   </head>
   <body>
-    <h1>🛡️ Veritas settings</h1>
+    <div class="wrap">
+      <aside class="sidebar">
+        <div class="logo">🛡️ Veritas</div>
+        <span class="version">v0.1</span>
+        <nav class="nav">
+          <span>General</span>
+          <span>Connection</span>
+          <span>Privacy</span>
+        </nav>
+      </aside>
+      <main class="content">
+        <div class="card">
+          <h1>Settings</h1>
+          <div class="sub">Configure how Veritas checks the pages you read.</div>
 
-    <label for="region">Your region (trusted sources)</label>
-    <select id="region">
-      <option value="in">India — TOI, India Today, The Hindu, NDTV…</option>
-      <option value="us">United States — Reuters, AP, NYT, NPR…</option>
-      <option value="uk">United Kingdom — BBC, Guardian, FT…</option>
-      <option value="global">Global — Reuters, AP, BBC, Al Jazeera…</option>
-    </select>
-    <div class="hint">Stories are cross-checked against these outlets for corroboration.</div>
+          <label for="region">Your region (trusted sources)</label>
+          <select id="region">
+            <option value="in">India — TOI, India Today, The Hindu, NDTV…</option>
+            <option value="us">United States — Reuters, AP, NYT, NPR…</option>
+            <option value="uk">United Kingdom — BBC, Guardian, FT…</option>
+            <option value="global">Global — Reuters, AP, BBC, Al Jazeera…</option>
+          </select>
 
-    <label for="backend">Backend URL</label>
-    <input id="backend" type="url" placeholder="http://localhost:8000" />
-    <div class="hint">Where the analysis API runs. Default: local dev server.</div>
+          <label for="backend">Backend URL</label>
+          <input id="backend" type="url" placeholder="http://localhost:8000" />
+          <div class="connrow" id="conn"><span class="dot"></span><span id="connText">Checking…</span></div>
 
-    <label for="apiKey">API key (optional)</label>
-    <input id="apiKey" type="password" placeholder="vfnd_…" autocomplete="off" />
-    <div class="hint">Required if the backend has authentication enabled. Stored locally on this
-      device only — never synced, never sent anywhere except your backend.</div>
+          <label for="apiKey">API key (optional)</label>
+          <input id="apiKey" type="password" placeholder="vfnd_…" autocomplete="off" />
+          <div class="hint">Required if the backend has authentication enabled. Stored locally on this
+            device only — never synced, never sent anywhere except your backend.</div>
 
-    <label><input type="checkbox" id="autoCheck" style="width:auto" /> Auto-check pages that look like news</label>
+          <label style="margin-top: 16px; display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="autoCheck" style="width: auto" />
+            Auto-check pages that look like news
+          </label>
 
-    <button id="save">Save</button><span id="saved"></span>
+          <button id="save">Save settings</button>
+          <div class="privacy">
+            🔒 <strong>Privacy:</strong> Only the article text is sent to your backend — never the
+            full page, passwords, or browsing history.
+          </div>
+        </div>
+      </main>
+    </div>
     <script src="options.js"></script>
   </body>
 </html>

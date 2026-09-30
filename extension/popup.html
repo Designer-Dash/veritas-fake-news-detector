@@ -2,25 +2,136 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
-      body { font-family: system-ui, sans-serif; width: 280px; margin: 0; padding: 14px; }
-      h1 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 6px; align-items: center; }
-      #status { font-size: 13px; line-height: 1.5; min-height: 40px; }
-      button { width: 100%; padding: 8px; border: 0; border-radius: 8px; background: #1a237e;
-               color: #fff; font-size: 13px; cursor: pointer; margin-top: 10px; }
-      button.secondary { background: #eceff1; color: #263238; }
-      .verdict { font-weight: 700; }
-      .fake { color: #b3261e; }
-      .suspicious { color: #e65100; }
-      .uncertain { color: #f9a825; }
-      .trusted { color: #2e7d32; }
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        font-family: "Inter", system-ui, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        box-sizing: border-box;
+      }
+      .header {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .header h1 {
+        font-size: 16px;
+        margin: 0;
+        color: #ffffff;
+        font-weight: 700;
+      }
+      .header .sub {
+        font-size: 12px;
+        color: #64748b;
+      }
+      #badge {
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        font-size: 13px;
+        color: #ffffff;
+        background: #1e293b;
+      }
+      #meter {
+        height: 5px;
+        border-radius: 999px;
+        background: #1e293b;
+        margin-top: 8px;
+        overflow: hidden;
+      }
+      #meterFill {
+        height: 5px;
+        border-radius: 999px;
+        width: 0%;
+        background: #334155;
+        transition: width 250ms ease-out;
+      }
+      #summary {
+        font-size: 12px;
+        color: #94a3b8;
+        margin-top: 8px;
+        line-height: 1.45;
+        min-height: 16px;
+        overflow-wrap: anywhere;
+      }
+      #chips {
+        margin-top: 8px;
+        display: none;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .chip {
+        background: #1e293b;
+        color: #7dd3fc;
+        border-radius: 999px;
+        padding: 2px 10px;
+        font-size: 11px;
+      }
+      .shimmer {
+        height: 11px;
+        border-radius: 6px;
+        width: 85%;
+        background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+        background-size: 400px 100%;
+        animation: veritas-shimmer 1.5s ease-in-out infinite;
+        margin: 6px 0;
+      }
+      @keyframes veritas-shimmer {
+        0% { background-position: -200px 0; }
+        100% { background-position: calc(200px + 100%) 0; }
+      }
+      button {
+        font-family: inherit;
+        width: 100%;
+        padding: 9px;
+        border: 0;
+        border-radius: 10px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 10px;
+      }
+      #recheck {
+        background: #6366f1;
+        color: #ffffff;
+      }
+      #recheck:hover {
+        background: #4f46e5;
+      }
+      #settings {
+        background: transparent;
+        border: 1px solid #334155;
+        color: #94a3b8;
+      }
+      #settings:hover {
+        color: #e2e8f0;
+      }
     </style>
   </head>
   <body>
-    <h1>🛡️ Veritas</h1>
-    <div id="status">Checking this page…</div>
-    <button id="recheck">Re-check this page</button>
-    <button id="settings" class="secondary">Settings</button>
+    <div class="header">
+      <h1>🛡️ Veritas</h1>
+      <span class="sub">Fake news detector</span>
+    </div>
+    <div id="badge">Checking this page…</div>
+    <div id="meter"><div id="meterFill"></div></div>
+    <div id="summary"></div>
+    <div id="chips"></div>
+    <button id="recheck">↺ Re-check</button>
+    <button id="settings">Settings</button>
     <script src="popup.js"></script>
   </body>
 </html>

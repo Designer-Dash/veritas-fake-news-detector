@@ -8,6 +8,7 @@ Usage: python backend/tools/cdp_extension_test.py [url]
 """
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -132,6 +133,33 @@ def main() -> int:
         send("Runtime.enable")
         drain(0.5)
 
+        # Optional: delay /analyze (Fetch interception) so the Phase-1
+        # shimmer state is photographable despite a fast local backend.
+        delay = float(os.environ.get("VERITAS_DELAY_ANALYZE", "0"))
+        if delay > 0:
+            send("Fetch.enable", {"patterns": [{"urlPattern": "*localhost:8000/analyze*"}]})
+            drain(0.3)
+
+            def hold_requests():
+                """Hold intercepted /analyze requests for `delay` seconds."""
+                ws.settimeout(2.0)
+                held = []
+                deadline = time.time() + delay
+                while time.time() < deadline:
+                    try:
+                        data = json.loads(ws.recv())
+                    except websocket.WebSocketTimeoutException:
+                        continue
+                    if data.get("method") == "Fetch.requestPaused":
+                        held.append(data["params"]["requestId"])
+                for rid_ in held:
+                    ws.send(json.dumps({"id": 900000 + int(rid_[-3:], 16) % 100000, "method": "Fetch.continueRequest", "params": {"requestId": rid_}}))
+                ws.settimeout(10)
+                return len(held)
+
+            n_held = hold_requests()
+            print(f"interception: held {n_held} /analyze request(s) for {delay}s")
+
         def evaluate(expr, timeout=25):
             rid = send(
                 "Runtime.evaluate",
@@ -143,13 +171,32 @@ def main() -> int:
             return resp.get("result", {}).get("result", {}).get("value")
 
         evaluate(f"location.href = {json.dumps(url)}; 'navigating'")
-        time.sleep(6)
+        time.sleep(2.5)  # catch the Phase-1 analyzing state before the verdict lands
         drain(0.5)
 
+        # Immediate capture: Phase 1 (shimmer) if we're quick enough.
+        early = evaluate(
+            "(() => { const h = document.getElementById('veritas-banner-host');"
+            " return h ? 'present' : null; })()"
+        )
+        if early:
+            send("Page.enable")
+            drain(0.3)
+            rid = send("Page.captureScreenshot", {"format": "png"})
+            resp = drain(10, want_id=rid)
+            if resp and resp.get("result", {}).get("data"):
+                import base64
+
+                out = pathlib.Path(__file__).resolve().parents[2] / "banner-analyzing.png"
+                out.write_bytes(base64.b64decode(resp["result"]["data"]))
+                print(f"analyzing-state screenshot: {out}")
+        time.sleep(4)
+
         banner = None
-        for i in range(20):
-            time.sleep(2)
-            # The banner lives in a CLOSED shadow root (page JS must not reach
+        analyzing_seen = None
+        for i in range(30):
+            time.sleep(1)
+            # The card lives in a CLOSED shadow root (page JS must not reach
             # it), so light-DOM detection is the host element + its geometry;
             # textual proof comes from the screenshot below.
             banner = evaluate(
@@ -158,7 +205,21 @@ def main() -> int:
                 " return { rendered: r.width > 0 && r.height > 0, w: Math.round(r.width), h: Math.round(r.height),"
                 " x: Math.round(r.x), y: Math.round(r.y) }; })()"
             )
+            if banner and analyzing_seen is None:
+                analyzing_seen = True
+                rid = send("Page.captureScreenshot", {"format": "png"})
+                resp = drain(10, want_id=rid)
+                if resp and resp.get("result", {}).get("data"):
+                    import base64
+
+                    out = pathlib.Path(__file__).resolve().parents[2] / "banner-phase2.png"
+                    out.write_bytes(base64.b64decode(resp["result"]["data"]))
+                    print(f"phase2 screenshot: {out}")
             if banner:
+                # Verdict has applied once the footer no longer says Checking…
+                footer = evaluate(
+                    "'ok'"  # geometry probe only; footer proof is the second screenshot
+                )
                 break
 
         print("=== result ===")
@@ -219,8 +280,9 @@ def main() -> int:
                     gone = evaluate("document.getElementById('veritas-banner-host') === null")
                     print(f"dismiss-removes: {gone}")
 
-        # Screenshot proof of the rendered banner.
+        # Screenshot proof of the settled (verdict-applied) card.
         if banner:
+            time.sleep(4)  # allow backend round trip to complete
             send("Page.enable")
             drain(0.3)
             rid = send("Page.captureScreenshot", {"format": "png"})
@@ -230,7 +292,7 @@ def main() -> int:
 
                 out = pathlib.Path(__file__).resolve().parents[2] / "banner-live.png"
                 out.write_bytes(base64.b64decode(resp["result"]["data"]))
-                print(f"screenshot saved: {out}")
+                print(f"verdict screenshot saved: {out}")
 
         print(f"=== console logs captured ({len(logs)}) ===")
         for kind, text in logs[-12:]:
