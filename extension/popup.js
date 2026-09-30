@@ -1,15 +1,7 @@
-// Popup logic: show verdict for the active tab, allow manual re-check.
+// Popup logic: show verdict for the active tab via the background relay
+// (one fetch path for the whole extension), allow manual re-check.
 
 const statusEl = document.getElementById("status");
-
-function render(result) {
-  statusEl.innerHTML = `
-    <div class="verdict ${result.verdict}">${labelFor(result.verdict)}</div>
-    <div>Suspicion ${(result.suspicion * 100).toFixed(0)}% ·
-         confidence ${(result.confidence * 100).toFixed(0)}%</div>
-    <div style="margin-top:6px">${escapeHtml(result.summary || "")}</div>
-  `;
-}
 
 function labelFor(v) {
   return {
@@ -26,35 +18,44 @@ function escapeHtml(s) {
   }[c]));
 }
 
-async function analyzeActiveTab() {
+function render(result) {
+  const stars = Math.round((result.confidence || 0) * 5);
+  statusEl.innerHTML = `
+    <div class="verdict ${result.verdict}">${labelFor(result.verdict)}</div>
+    <div>Suspicion ${(result.suspicion * 100).toFixed(0)}% ·
+         confidence ${"★".repeat(stars)}${"☆".repeat(5 - stars)}</div>
+    <div style="margin-top:6px">${escapeHtml(result.summary || "")}</div>
+    ${(result.corroborating_sources || []).length
+      ? `<div style="margin-top:6px">Corroborated by: ${result.corroborating_sources
+          .slice(0, 3)
+          .map((m) => escapeHtml(m.outlet))
+          .join(", ")}</div>`
+      : ""}
+  `;
+}
+
+async function analyzeActiveTab(triggerBanner) {
   statusEl.textContent = "Checking this page…";
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) {
+  if (!tab || !tab.url) {
     statusEl.textContent = "No active page to check.";
     return;
   }
-  chrome.tabs.sendMessage(tab.id, { type: "VERITAS_ANALYZE" }, (resp) => {
-    if (chrome.runtime.lastError) {
-      statusEl.textContent = "Cannot analyze this page (restricted or not loaded).";
+  // Trigger the on-page banner too (only when the content script is present).
+  if (triggerBanner && tab.id) {
+    chrome.tabs.sendMessage(tab.id, { type: "VERITAS_ANALYZE" }, () => void chrome.runtime.lastError);
+  }
+  // Verdict for the popup itself goes through the background worker.
+  chrome.runtime.sendMessage({ type: "VERITAS_FETCH", payload: { url: tab.url } }, (res) => {
+    if (chrome.runtime.lastError || !res || res.error) {
+      statusEl.textContent =
+        "Backend unreachable — is it running? " + ((res && res.error) || "");
       return;
     }
-    // The content script renders the banner; pull the latest result for the popup.
-    setTimeout(async () => {
-      const cfg = await chrome.storage.sync.get({ backend: "http://localhost:8000", region: "in" });
-      try {
-        const res = await fetch(cfg.backend.replace(/\/$/, "") + "/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: tab.url, region: cfg.region, include_cross_check: true }),
-        });
-        render(await res.json());
-      } catch (e) {
-        statusEl.textContent = "Backend unreachable — is it running on " + cfg.backend + "?";
-      }
-    }, 400);
+    render(res);
   });
 }
 
-document.getElementById("recheck").addEventListener("click", analyzeActiveTab);
+document.getElementById("recheck").addEventListener("click", () => analyzeActiveTab(true));
 document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
-analyzeActiveTab();
+analyzeActiveTab(false);

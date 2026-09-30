@@ -37,8 +37,8 @@ backend/
 
 extension/
   manifest.json      MV3 manifest
-  content.js         Extracts article, calls API, renders verdict banner
-  background.js      Service worker (popup → tab messaging)
+  content.js         Extracts article, requests analysis, renders verdict banner
+  background.js      Service worker: backend fetch relay (mixed-content-safe)
   popup.html/js      Toolbar popup with verdict
   options.html/js    Region + backend settings
 ```
@@ -70,6 +70,23 @@ curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
   -d '{"url": "https://www.thehindu.com/news/national/some-story/", "region": "in"}'
 ```
+
+### 4. Run the tests
+
+```bash
+cd backend
+python -m pytest -q
+```
+
+20 deterministic, offline tests cover text extraction/scoring, cross-check
+similarity and self-outlet exclusion, pipeline verdicts (with mocked network),
+and the API contract. Live behavior against real news pages is verified
+separately (see the live-test reports in the project history).
+
+> **Architecture note:** the content script never calls the backend directly.
+> On an HTTPS page that fetch would be blocked as mixed content (verified in
+> a real browser); requests are relayed through the MV3 service worker
+> (`background.js`), which is exempt from the page's mixed-content rules.
 
 ## Roadmap (next milestones)
 

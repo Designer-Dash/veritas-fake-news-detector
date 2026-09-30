@@ -1,11 +1,12 @@
 // Veritas content script — runs on every page, extracts the article,
-// asks the backend for a verdict and renders a banner.
-
-const DEFAULT_BACKEND = "http://localhost:8000";
+// asks the backend (via the background worker) for a verdict and renders a
+// banner. The fetch MUST go through the background service worker: a
+// content script inside an HTTPS page is mixed-content-blocked from
+// calling http://localhost directly (verified in live browser testing).
 
 function getBackendBase() {
   return new Promise((resolve) => {
-    chrome.storage.sync.get({ backend: DEFAULT_BACKEND, region: "in", autoCheck: true }, (cfg) => {
+    chrome.storage.sync.get({ backend: "http://localhost:8000", region: "in", autoCheck: true }, (cfg) => {
       resolve(cfg);
     });
   });
@@ -97,17 +98,15 @@ async function analyzeCurrentPage() {
     headline: extractHeadline(),
     html: document.documentElement.outerHTML.slice(0, 900000),
   };
-  try {
-    const res = await fetch(cfg.backend.replace(/\/$/, "") + "/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error("backend " + res.status);
-    renderBanner(await res.json());
-  } catch (err) {
-    console.warn("[Veritas] analysis unavailable:", err.message);
-  }
+  // Ask the background worker to perform the fetch; the response is the
+  // backend's verdict JSON (or { error }) relayed back.
+  chrome.runtime.sendMessage({ type: "VERITAS_FETCH", payload }, (res) => {
+    if (chrome.runtime.lastError || !res || res.error) {
+      console.warn("[Veritas] analysis unavailable:", (res && res.error) || chrome.runtime.lastError);
+      return;
+    }
+    renderBanner(res);
+  });
 }
 
 // Only auto-analyze pages that look like articles/news.
