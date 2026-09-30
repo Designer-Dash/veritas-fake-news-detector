@@ -83,14 +83,37 @@ async function handleFetch(payloadRaw, sendResponse) {
     if (!res.ok) throw new Error("backend responded " + res.status);
     const data = await res.json();
     // Relay only the fields the banner/popup need (response minimization).
+    // reason: highest-weight evidence claim, for the expanded card.
+    let reason = "";
+    if (Array.isArray(data.evidence) && data.evidence.length) {
+      let top = null;
+      for (const e of data.evidence) {
+        if (e && typeof e.claim === "string" && typeof e.weight === "number") {
+          if (!top || Math.abs(e.weight) > Math.abs(top.weight)) top = e;
+        }
+      }
+      if (top) reason = top.claim.slice(0, 160);
+    }
+    let aiMedia = false;
+    const media = data.ai_signals && data.ai_signals.media;
+    if (media && typeof media === "object") {
+      aiMedia = media.weight >= 0.3 || (Array.isArray(media.tool_markers) && media.tool_markers.length > 0);
+    }
     sendResponse({
       verdict: typeof data.verdict === "string" ? data.verdict : "uncertain",
       suspicion: typeof data.suspicion === "number" ? data.suspicion : 0.5,
       confidence: typeof data.confidence === "number" ? data.confidence : 0.5,
-      summary: typeof data.summary === "string" ? data.summary.slice(0, 500) : "",
-      corroborating_sources: Array.isArray(data.corroborating_sources)
-        ? data.corroborating_sources.slice(0, 5)
+      reason,
+      sources_checked: typeof data.ai_signals?.cross_check?.checked === "number"
+        ? data.ai_signals.cross_check.checked
+        : 0,
+      corroborating: Array.isArray(data.corroborating_sources)
+        ? data.corroborating_sources.slice(0, 3).map((m) => ({
+            outlet: typeof m.outlet === "string" ? m.outlet.slice(0, 80) : "",
+            url: typeof m.url === "string" && /^https:\/\//i.test(m.url) ? m.url : "",
+          }))
         : [],
+      ai_media: aiMedia,
     });
   } catch (err) {
     sendResponse({ error: String((err && err.message) || err) });

@@ -7,10 +7,10 @@
 const statusEl = document.getElementById("status");
 
 const VERDICT_LABELS = {
-  fake: "❌ Likely FAKE / AI-generated",
-  suspicious: "⚠️ Suspicious",
-  uncertain: "❓ Uncertain",
-  trusted: "✅ No fake-news signals found",
+  fake: "🔴 Contradicted",
+  suspicious: "🟠 Misleading",
+  uncertain: "🟡 Unverified",
+  trusted: "🟢 Supported",
 };
 
 function el(tag, style, text) {
@@ -43,8 +43,8 @@ function render(result) {
   if (typeof result.summary === "string" && result.summary) {
     statusEl.appendChild(el("div", "margin-top:6px", result.summary.slice(0, 400)));
   }
-  const sources = Array.isArray(result.corroborating_sources)
-    ? result.corroborating_sources
+  const sources = Array.isArray(result.corroborating)
+    ? result.corroborating
         .filter((m) => m && typeof m.outlet === "string" && typeof m.url === "string" && /^https:\/\//i.test(m.url))
         .slice(0, 3)
     : [];

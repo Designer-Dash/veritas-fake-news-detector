@@ -167,6 +167,58 @@ def main() -> int:
             json.dumps(banner, indent=2, ensure_ascii=False) if banner else "NOT FOUND",
         )
 
+        # Interaction contract: real mouse clicks via CDP Input domain.
+        # 1) click pill -> expands (card ~288px wide replaces the pill)
+        # 2) click far outside -> collapses back to pill
+        # 3) re-expand, click the dismiss button -> host element removed
+        if banner:
+            def host_rect():
+                return evaluate(
+                    "(() => { const h = document.getElementById('veritas-banner-host');"
+                    " if (!h) return null; const r = h.getBoundingClientRect();"
+                    " return {x: r.x, y: r.y, w: r.width, h: r.height}; })()"
+                )
+
+            def click_at(x, y):
+                for t in ("mousePressed", "mouseReleased"):
+                    send("Input.dispatchMouseEvent", {
+                        "type": t, "x": int(x), "y": int(y),
+                        "button": "left", "clickCount": 1,
+                    })
+                    drain(0.3)
+
+            r1 = host_rect()
+            if r1:
+                click_at(r1["x"] + r1["w"] / 2, r1["y"] + r1["h"] / 2)
+                r2 = host_rect()
+                # Card is a fixed ~290px; pills vary (150-250px), so 1.3x is
+                # the reliable expand signal.
+                expanded = bool(r2 and r2["w"] > r1["w"] * 1.3)
+                print(f"expand-on-click: {expanded} (pill {r1['w']:.0f}px -> {r2['w']:.0f}px)")
+
+                # screenshot of the expanded card
+                rid = send("Page.captureScreenshot", {"format": "png"})
+                resp = drain(10, want_id=rid)
+                if resp and resp.get("result", {}).get("data"):
+                    import base64
+                    out = pathlib.Path(__file__).resolve().parents[2] / "banner-expanded.png"
+                    out.write_bytes(base64.b64decode(resp["result"]["data"]))
+                    print(f"expanded screenshot: {out}")
+
+                # outside click -> collapse
+                click_at(200, 400)
+                r3 = host_rect()
+                collapsed = bool(r3 and r3["w"] <= r1["w"] * 1.3)
+                print(f"outside-click-collapses: {collapsed} ({r3['w']:.0f}px)")
+
+                # re-expand, then dismiss via the × (bottom-right of card)
+                click_at(r3["x"] + r3["w"] / 2, r3["y"] + r3["h"] / 2)
+                r4 = host_rect()
+                if r4 and r4["w"] > r1["w"] * 1.3:
+                    click_at(r4["x"] + r4["w"] - 16, r4["y"] + r4["h"] - 14)
+                    gone = evaluate("document.getElementById('veritas-banner-host') === null")
+                    print(f"dismiss-removes: {gone}")
+
         # Screenshot proof of the rendered banner.
         if banner:
             send("Page.enable")
