@@ -7,6 +7,8 @@ Deliberately dependency-free so it runs anywhere. It computes:
   - emoji/hashtag density                           -> high = low-credibility
   - hedging / clickbait phrase hits                 -> high = suspicious
   - ALL-CAPS and exclamation abuse                  -> high = suspicious
+
+Signature marker 003/013 · designer-dash
 """
 
 from __future__ import annotations

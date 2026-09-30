@@ -14,6 +14,8 @@
 // widget lives in a CLOSED shadow root so page CSS/JS cannot read or restyle
 // it, the only page data uploaded is the extracted article text — never the
 // full DOM — and any URL rendered as a link must pass an https-only check.
+//
+// Signature marker 011/013 · designer-dash
 
 function getBackendBase() {
   return new Promise((resolve) => {

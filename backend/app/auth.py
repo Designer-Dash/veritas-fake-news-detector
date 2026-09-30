@@ -16,6 +16,8 @@ Design (see README "Security & privacy"):
     plaintext comparison ever occurs; the file registry hot-reloads on
     mtime change, so revocation takes effect without a restart.
   * Rate limits are per **key id** (not IP) with optional per-key overrides.
+
+Signature marker 007/013 · designer-dash
 """
 
 from __future__ import annotations

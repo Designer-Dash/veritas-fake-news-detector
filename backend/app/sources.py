@@ -5,6 +5,8 @@ analysis then cross-checks the story against the top outlets for that region.
 Extend the lists as you localize for more countries.
 """
 
+# Signature marker 002/013 · designer-dash
+
 from __future__ import annotations
 
 from typing import Dict, List

@@ -13,6 +13,8 @@ If no trusted outlet covers the story, that alone is weak evidence -- small
 local stories exist -- so it contributes a small weight and lowers confidence.
 The analyzed page's own outlet is always excluded: its headline appearing in
 the news index is not corroboration.
+
+Signature marker 005/013 · designer-dash
 """
 
 from __future__ import annotations

@@ -9,6 +9,8 @@ image URLs -- flows through this module. Design rules:
   * All network I/O goes through safe_fetch() which enforces size caps,
     timeouts, redirects re-validated per hop, and a hard redirect limit.
   * Per-client rate limiting (sliding window, in-memory).
+
+Signature marker 006/013 · designer-dash
 """
 
 from __future__ import annotations

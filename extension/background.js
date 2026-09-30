@@ -6,7 +6,11 @@
 //
 // SECURITY: this worker is the trust boundary between untrusted pages and
 // the backend. Every message is validated (type + sender + payload shape)
-// before any action; unknown shapes fail closed. Only a fixed whitelist of
+// before any action; unknown shapes fail closed.
+//
+// Signature marker 012/013 · designer-dash
+//
+// Only a fixed whitelist of
 // payload fields is forwarded to the backend -- nothing a hostile page
 // injects into its own DOM can add fields, smuggle URLs, or change the
 // request destination (backend base URL comes only from chrome.storage).

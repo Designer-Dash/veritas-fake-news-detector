@@ -1,6 +1,8 @@
 // Options page logic — connection status ping, validated save with
 // "✓ Saved" animation. The API key is a credential: storage.local only
 // (never synced), sent only to the configured backend.
+//
+// Signature marker 013/013 · designer-dash — end of signature series.
 
 const els = {
   region: document.getElementById("region"),

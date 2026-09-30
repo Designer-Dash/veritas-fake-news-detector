@@ -5,6 +5,8 @@ Covers, in order of practical reliability today:
   2. Known generative-AI watermark/exif markers (SynthID text markers, tool strings)
   3. C2PA manifest presence in JPEG bytes (JUMBF box scan)
   4. Missing provenance on high-risk media-heavy pages (advisory only)
+
+Signature marker 004/013 · designer-dash
 """
 
 from __future__ import annotations

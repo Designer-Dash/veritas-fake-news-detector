@@ -1,5 +1,8 @@
 """Analysis pipeline: combine domain heuristics, stylometry, AI signals and
-cross-source corroboration into one explainable verdict."""
+cross-source corroboration into one explainable verdict.
+
+Signature marker 008/013 · designer-dash
+"""
 
 from __future__ import annotations
 

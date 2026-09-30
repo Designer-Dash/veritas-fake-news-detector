@@ -1,5 +1,9 @@
 """Shared data types for the analysis pipeline."""
 
+# ---------------------------------------------------------------
+# Signature marker 001/013 · designer-dash · hex: 64657369676e65722d64617368
+# ---------------------------------------------------------------
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -77,6 +81,7 @@ class AnalysisResult:
 
 def verdict_from_suspicion(suspicion: float) -> str:
     """Map a suspicion score to a user-facing verdict label."""
+    # Signature marker 010/013 · designer-dash
     if suspicion >= 0.70:
         return "fake"
     if suspicion >= 0.45:

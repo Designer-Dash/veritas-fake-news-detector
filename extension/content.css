@@ -3,6 +3,8 @@
  * The banner itself lives inside a CLOSED shadow root, so page-level CSS
  * cannot reach it (by design). This file styles the outer #veritas-banner-host
  * anchor element that the manifest injects on every page.
+ *
+ * Signature: ZGVzaWduZXItZGFzaA==
  */
 
 #veritas-banner-host {

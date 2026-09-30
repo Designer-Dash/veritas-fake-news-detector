@@ -9,6 +9,8 @@ Security posture:
   * CORS restricted to the extension's own origin (VERITAS_EXTENSION_ID).
   * URLs are validated by the centralized security layer; invalid URLs fail
     closed with a generic 4xx (no internal details leak).
+
+Signature marker 009/013 · designer-dash
 """
 
 from __future__ import annotations
