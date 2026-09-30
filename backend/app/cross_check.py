@@ -107,11 +107,13 @@ def jaccard(a: set, b: set) -> float:
 
 
 def _strip_source_suffix(title: str) -> str:
-    """Google News titles end with " - Outlet Name"; drop that tail."""
-    parts = title.rsplit(" - ", 1)
-    if len(parts) == 2 and len(parts[0]) > 20:
-        if parts[1].strip().lower() in OUTLET_NAME_DOMAINS:
-            return parts[0]
+    """Drop tailing outlet names from titles (e.g., ' - Outlet' or ' | Outlet')."""
+    for sep in [" - ", " | "]:
+        parts = title.rsplit(sep, 1)
+        if len(parts) == 2 and len(parts[0]) > 20:
+            # If the suffix is a known domain or just short, strip it
+            if parts[1].strip().lower() in OUTLET_NAME_DOMAINS or len(parts[1]) < 20:
+                return parts[0]
     return title
 
 
@@ -247,7 +249,7 @@ def search_trusted_coverage(
                     )
                     sim = max(sim, body_sim)
 
-            if sim >= 0.30 and shared >= 2:
+            if sim >= 0.15 and shared >= 1:
                 best_sim = max(best_sim, sim)
                 matches.append(
                     {
@@ -264,7 +266,7 @@ def search_trusted_coverage(
 
     if not matches:
         # Fallback: retry with the most distinctive (longest) headline tokens.
-        q2 = " ".join(sorted(set(_tokenize(headline)), key=len, reverse=True)[:6])
+        q2 = " ".join(sorted(set(_tokenize(headline)), key=len, reverse=True)[:4])
         if q2 and q2 != query:
             items2 = _parse_rss_items(_fetch(_google_news_url(q2, region)), limit)
             seen = {it["title"] for it in items}
