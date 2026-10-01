@@ -195,7 +195,7 @@ RSS_ITEM = """
 """
 
 
-def _mock_safe_fetch(monkeypatch, rss_by_query):
+def _mock_retrieval(monkeypatch, rss_by_query):
     """Canned RSS responder at the single retrieval boundary
     (SourceRetriever.fetch) -- one patch, no per-module safe_fetch."""
 
@@ -220,7 +220,7 @@ def test_pipeline_corroborates_real_story(monkeypatch):
         title="526 kg drugs worth Rs 3,000 crore seized from Iranian boat - India Today",
         outlet="India Today",
     ).encode()
-    _mock_safe_fetch(monkeypatch, {"news.google.com": rss})
+    _mock_retrieval(monkeypatch, {"news.google.com": rss})
 
     result = analyze(
         "https://www.thehindu.com/news/national/drugs-boat/article71526673.ece",
@@ -242,7 +242,7 @@ def test_pipeline_flags_fabricated_story(monkeypatch):
         + "Officials allegedly denied everything. " * 10
         + "</p></article></body></html>"
     )
-    _mock_safe_fetch(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
+    _mock_retrieval(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
 
     result = analyze(
         "http://truth-leaks-daily.xyz/2026/09/scientists-vanish.html",
@@ -309,7 +309,7 @@ def test_health_endpoint(client):
 
 
 def test_analyze_endpoint_contract(client, monkeypatch):
-    _mock_safe_fetch(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
+    _mock_retrieval(monkeypatch, {"news.google.com": b"<rss><channel></channel></rss>"})
     resp = client.post(
         "/analyze",
         json={

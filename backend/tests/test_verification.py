@@ -1194,3 +1194,71 @@ def test_unknown_coverage_with_links_weight_consistency(monkeypatch):
     # Contradiction-safety untouched: nudge only ever *reduces* suspicion,
     # and never appears when the pool contradicts (guard still in place).
     assert link_credit > 0 and cw.weight <= cwo.weight
+
+
+# ---------------------------------------------------------------------------
+# Source-freshness gate, end to end through analyze()
+# ---------------------------------------------------------------------------
+
+def _fresh_pool_rss(minutes_old: int) -> bytes:
+    pub = (datetime.now(timezone.utc) - timedelta(minutes=minutes_old)).strftime(
+        "%d %b %Y %H:%M:%S GMT"
+    )
+    return (
+        "<rss><channel>"
+        "<item><title>526 kg drugs worth Rs 3,000 crore seized from Iranian boat</title>"
+        "<link>https://news.google.com/rss/articles/1</link>"
+        f"<source>India Today</source><pubDate>{pub}</pubDate></item>"
+        "</channel></rss>"
+    ).encode()
+
+
+def test_fresh_pool_recent_article_breaking_end_to_end(monkeypatch):
+    """Mirror of the stale-pool case: pool published minutes ago + recent
+    article -> BREAKING_NEWS, freshness visible in breaking_info."""
+    from app.pipeline import analyze
+
+    _mock_retrieval(monkeypatch, _fresh_pool_rss(20))
+    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+    result = analyze(
+        f"https://city-voice.in/news/{today}/drugs-boat.html",
+        region="in",
+        html=_DRUGS_HTML,
+    )
+    v = result.ai_signals["verification"]
+    assert v["breaking"] is True
+    assert v["state"] == BREAKING
+    info = v["breaking_info"]
+    assert info["median_source_age_hours"] is not None
+    assert info["median_source_age_hours"] <= get_config().breaking_max_median_age_hours
+
+
+def test_debug_payload_reports_median_after_cache_hit(monkeypatch, caplog):
+    """A second VERITAS_DEBUG run of the same article hits the verification
+    cache (median_age never recomputed) -- the payload must still report pool
+    freshness from the cached breaking_info instead of null."""
+    import json as _json
+    import logging as _logging
+
+    from app.pipeline import analyze
+
+    _mock_retrieval(monkeypatch, _fresh_pool_rss(20))
+    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+    url = f"https://city-voice.in/news/{today}/drugs-boat.html"
+
+    monkeypatch.setenv("VERITAS_DEBUG", "1")
+    with caplog.at_level(_logging.DEBUG, logger="veritas.pipeline"):
+        analyze(url, region="in", html=_DRUGS_HTML)   # miss: computes + caches
+        caplog.clear()
+        analyze(url, region="in", html=_DRUGS_HTML)   # hit: median_age is None
+
+    raw = [
+        r.getMessage().split("debug_payload: ", 1)[1]
+        for r in caplog.records
+        if "debug_payload: " in r.getMessage()
+    ]
+    assert len(raw) == 1
+    payload = _json.loads(raw[0])
+    assert payload["median_source_age_hours"] is not None
+    assert payload["median_source_age_hours"] <= get_config().breaking_max_median_age_hours
+    assert payload["evidence"]["breaking"] is True

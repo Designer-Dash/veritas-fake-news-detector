@@ -148,7 +148,10 @@ def analyze(
     retriever: Optional[SourceRetriever] = None,
 ) -> AnalysisResult:
     """Full analysis of a news page. `html` may be supplied by the extension
-    (content script DOM snapshot) to avoid a refetch; otherwise we fetch it."""
+    (content script DOM snapshot) to avoid a refetch; otherwise we fetch it.
+    `retriever` optionally injects a SourceRetriever (its `fetch` is the
+    retrieval boundary, or a custom `fetch_func` for an alternative source
+    backend); defaults to the class-level SourceRetriever()."""
 
     # Fail closed on malformed/unsupported page URLs (defense in depth -- the
     # API layer validates too; this protects direct callers of analyze()).
@@ -254,10 +257,21 @@ def analyze(
             # retrieval and every pairwise comparison.
             claim = extract_claim(headline, text, budget=budget)
             queries = generate_search_queries(claim, headline)
+            published_date = extract_published_date(html, url=url)
             # Avoid re-verifying the same claim/page while the result is fresh.
+            # The article's published date is part of the key: a corrected or
+            # day-rolled date must never reuse a verdict (breaking-news state
+            # depends on it). Source-pool age drift is bounded by the TTL.
             vcache = get_cache("verification", maxsize=64, ttl=cfg.verification_cache_ttl)
             vkey = hashlib.sha256(
-                "\x00".join((claim.claim, region, dom)).encode("utf-8", "ignore")
+                "\x00".join(
+                    (
+                        claim.claim,
+                        region,
+                        dom,
+                        published_date.isoformat() if published_date else "",
+                    )
+                ).encode("utf-8", "ignore")
             ).hexdigest()
             hit, cached = vcache.get(vkey)
             if hit:
@@ -272,7 +286,7 @@ def analyze(
                     claim,
                     candidates,
                     region=region,
-                    published_date=extract_published_date(html, url=url),
+                    published_date=published_date,
                     queries=queries,
                     budget=budget,
                     cfg=cfg,
@@ -468,7 +482,15 @@ def analyze(
                 "penalty": vdict["contradiction_penalty_applied"] if vdict else None,
                 "breaking": vdict["breaking"] if vdict else False,
             },
-            "median_source_age_hours": median_age,
+            "median_source_age_hours": (
+                median_age
+                if median_age is not None
+                else (
+                    vdict["breaking_info"].get("median_source_age_hours")
+                    if vdict
+                    else None
+                )
+            ),
             "cross_weight": round(cross_weight, 3),
             "suspicion": round(suspicion, 3),
             "confidence": round(confidence, 3),

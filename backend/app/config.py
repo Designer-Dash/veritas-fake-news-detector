@@ -108,6 +108,11 @@ class VerificationConfig:
     cross_weight_slope: float = 1.0
 
     # -- Breaking news --------------------------------------------------------
+    # The window is in hours-to-days, not ~6h, on purpose: the extension
+    # sends plain text, so article dates often come from a URL path segment
+    # (midnight UTC, no time of day) -- a 6h window would disable breaking
+    # detection for most of the day. Tighten only for payloads that carry a
+    # full timestamp.
     breaking_window_hours: float = 48.0
     breaking_min_sources: int = 3
     # Source-freshness gate: article recency alone is not enough -- a stale

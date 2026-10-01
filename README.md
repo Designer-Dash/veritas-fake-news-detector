@@ -13,7 +13,7 @@ it, and links to trusted coverage of the same story.
 |---|---|---|
 | **Media provenance** | C2PA / Content Credentials manifests, IPTC *Digital Source Type* codes, generator EXIF/XMP markers (Midjourney, Stable Diffusion, Firefly…), SynthID-style byte markers | IPTC/C2PA standards; watermark-survey literature |
 | **AI-writing cues** | Sentence-length burstiness, vocabulary richness, stock LLM phrases, emoji/hashtag/clickbait density | Stylometric fake-news detection (e.g. `s41598-021-03100-6`) |
-| **Cross-source corroboration** | The underlying **claim** is extracted (Gemini when a key is configured, deterministic fallback otherwise), searched against the reference-outlet pool with 2–3 optimized queries, and the strongest **5–10 sources** are compared by semantic similarity — not exact headline matching — then scored as weighted SUPPORTS / CONTRADICTS / UNKNOWN consensus | Explainable multi-source verification (`s41599-025-05389-4`) |
+| **Cross-source corroboration** | The underlying **claim** is extracted (Gemini when a key is configured, deterministic fallback otherwise), searched against the reference-outlet pool with 2–3 optimized queries (fetched in parallel), and the strongest **5–10 sources** are compared by semantic similarity — not exact headline matching — then scored as weighted SUPPORTS / CONTRADICTS / UNKNOWN consensus | Explainable multi-source verification (`s41599-025-05389-4`) |
 | **Domain reputation** | Known trusted outlets get a bonus; lookalike TLDs (`.com.co`, `.news`, `.xyz`), hyphen-heavy and blog-mashup domains get penalties | Classic fake-news feature work |
 
 Every signal contributes a signed weight; the sum is a **suspicion score** mapped
@@ -49,6 +49,31 @@ computed by the backend. All thresholds and weights live in
 `VERITAS_DEBUG=1` emits one JSON `debug_payload` per analysis at DEBUG level
 (developer diagnostics only — never part of the API response).
 
+### Tuning knobs (`VERITAS_*` env vars)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `VERITAS_W_SEMANTIC` / `VERITAS_W_CONSENSUS` / `VERITAS_W_FACTS` / `VERITAS_W_SOURCE` | 0.30 / 0.30 / 0.20 / 0.20 | Evidence Score weights (E = w·M + w·C + w·F + w·S) |
+| `VERITAS_TIER1_WEIGHT` / `VERITAS_TIER2_WEIGHT` / `VERITAS_TIER3_WEIGHT` / `VERITAS_UNKNOWN_WEIGHT` | 1.00 / 0.85 / 0.65 / 0.40 | Source-quality weight per trust tier |
+| `VERITAS_MIN_SOURCES` / `VERITAS_MAX_SOURCES` | 5 / 10 | Verification window; fewer than min → `INSUFFICIENT_EVIDENCE` |
+| `VERITAS_SUPPORTS_SIMILARITY` / `VERITAS_RELEVANCE_SIMILARITY` | 60 / 40 | Relationship thresholds on the 0–100 similarity blend |
+| `VERITAS_RETRIEVAL_FLOOR` | 0.15 | RSS results below this relevance are dropped |
+| `VERITAS_CONTRADICTION_PENALTY` | 15 | Flat E deduction when a strong trusted source contradicts |
+| `VERITAS_STRONG_CONTRA_WEIGHT` / `VERITAS_STRONG_CONTRA_SIM` | 0.85 / 40 | What counts as a "strong" contradiction |
+| `VERITAS_CROSS_SLOPE` | 1.0 | suspicion += (0.5 − E/100) × slope |
+| `VERITAS_NO_COVERAGE_PENALTY` / `VERITAS_BREAKING_PENALTY` | 0.15 / 0.05 | Cross-source weight when zero sources are selected |
+| `VERITAS_FACT_UNMENTIONED_FACTOR` | 0.5 | Credit for facts no source confirms or denies |
+| `VERITAS_BREAKING_WINDOW_HOURS` | 48 | Article recency window (URL-only dates are date-granular — see `config.py`) |
+| `VERITAS_BREAKING_MIN_SOURCES` | 3 | Below this count a recent story may be breaking |
+| `VERITAS_BREAKING_MAX_MEDIAN_AGE_HOURS` | 2.0 | Source-freshness gate: older median pool ⇒ never breaking |
+| `VERITAS_GEMINI_ENABLED` / `VERITAS_GEMINI_MAX_CALLS` | auto / 2 | Structured analysis budget (never the verdict) |
+| `VERITAS_DEBUG` | off | One JSON `debug_payload` per analysis at DEBUG level |
+| `VERITAS_RATE_MAX` / `VERITAS_RATE_WINDOW_SEC` / `VERITAS_MAX_CONCURRENT` | see `config`/security section | Abuse limits |
+| `VERITAS_EXTENSION_ID` / `VERITAS_AUTH_DISABLED` | empty / off | CORS lockdown; dev auth opt-out |
+
+Every knob is read per request (`app/config.py:get_config()`), so changes take
+effect without a server restart.
+
 ## Repository layout
 
 ```
@@ -66,6 +91,7 @@ backend/
     gemini_client.py Budgeted/cached Gemini JSON client (analysis only, never verdicts)
     cache.py         TTL caches: claims, RSS results, verifications
     sources.py       Trusted-outlet registry + configurable source-weight tiers
+    textnorm.py      Shared stopword/suffix/date primitives (breaks layer cycle)
     domain.py        Dataclasses: Evidence, SourceMatch, AnalysisResult
   requirements.txt
 
@@ -112,13 +138,13 @@ cd backend
 python -m pytest -q
 ```
 
-111 deterministic, offline tests cover text extraction/scoring, cross-check
+114 deterministic, offline tests cover text extraction/scoring, cross-check
 similarity and self-outlet exclusion, claim extraction/normalization,
 consensus/evidence-score math, contradiction penalties, breaking-news
-detection (including the source-freshness gate), source weighting,
-retrieval caps, the injectable SourceRetriever boundary, the
-VERITAS_DEBUG payload, pipeline verdicts (with mocked network), and the
-API contract. Gemini is force-disabled in tests; its HTTP
+detection (including the source-freshness gate, end to end), source
+weighting, retrieval caps, the injectable SourceRetriever boundary, the
+VERITAS_DEBUG payload, evidence-weight/suspicion consistency, pipeline
+verdicts (with mocked network), and the API contract. Gemini is force-disabled in tests; its HTTP
 call is covered with a mocked transport. Live behavior against real news
 pages is verified separately (see the live-test reports in the project
 history).
@@ -137,9 +163,10 @@ history).
 2. **Real AI-image detection** — swap the byte-marker scan for a CNN/ViT detector
    (e.g. UniversalFakeDetect or SynthID-verify via API) and a reverse-image search
    (Google Lens API) to catch re-used/out-of-context photos.
-3. **Claim matching instead of headline matching** — extract claims, embed with
-   sentence-transformers, and do semantic nearest-neighbor search against fact-check
-   APIs (Google Fact Check Tools, Alt News, BOOM, PIB Fact Check for India).
+3. **Semantic claim matching at scale** — claim extraction and wording-tolerant
+   matching are live (deterministic blend in `app/verification.py`); the next step
+   is embedding-based nearest-neighbour search plus fact-check API lookups
+   (Google Fact Check Tools, Alt News, BOOM, PIB Fact Check for India).
 4. **Credibility database** — persist per-domain historical verdicts (NewsGuard-style)
    so frequent offenders are flagged instantly.
 5. **Cross-browser store release** — the MV3 build runs on Chrome, Edge, Brave and

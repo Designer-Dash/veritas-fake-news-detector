@@ -3,12 +3,15 @@
 For a given claim we:
   1. Build 2-3 optimized news search queries (Google News RSS -- no API key).
   2. Fetch results (capped per query, early-stopping once enough relevant
-     results exist; repeated searches answered from a TTL cache).
+     results exist; repeated searches answered from a TTL cache; uncached
+     queries are fetched in parallel so latency is one round trip).
   3. Resolve each result's outlet, exclude the analyzed page's own outlet,
      and rank by claim relevance (token Jaccard + difflib ratio on
      normalized strings -- wording-tolerant, never exact matching).
-  4. Return the strongest relevant candidates (capped at cfg.max_sources,
-     default 10) for the verification layer to classify and score.
+  4. Return the strongest relevant candidates ranked by relevance
+     (retrieval early-stops once cfg.max_sources + 5 relevant outlets exist;
+     the verification layer then keeps at most cfg.max_sources = 10) for the
+     verification layer to classify and score.
 
 If no outlet covers the story, that alone is weak evidence -- small local
 stories exist -- so it contributes only a small weight downstream and never
@@ -25,14 +28,16 @@ import difflib
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .cache import get_cache
 from .config import get_config
 from .security import safe_fetch
 from .sources import outlets_for_region, source_weight
+from .textnorm import STOPWORDS, extract_url_date, parse_rfc822
+from .textnorm import strip_source_suffix as _strip_source_suffix
 
 USER_AGENT = (
     "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)"
@@ -74,19 +79,6 @@ OUTLET_NAME_DOMAINS = {
     "the telegraph": "telegraph.co.uk",
 }
 
-STOPWORDS = set(
-    """a about above after again against all am an and any are aren't as at be
-because been before being below between both but by can't cannot could couldn't
-did didn't do does doesn't doing don't down during each few for from further had
-hadn't has hasn't have haven't having he her here hers herself him himself his
-how i if in into is isn't it its itself let's me more most mustn't my myself no
-nor not of off on once only or other ought our ours ourselves out over own same
-shan't she should shouldn't so some such than that the their theirs them
-themselves then there these they this those through to too under until up very
-was wasn't we were weren't what when where which while who whom why with won't
-would wouldn't you your yours yourself yourselves""".split()
-)
-
 
 def _normalize_text(text: str) -> str:
     """Lowercase, drop thousands separators and punctuation; keep digits."""
@@ -102,17 +94,6 @@ def jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
-
-
-def _strip_source_suffix(title: str) -> str:
-    """Drop tailing outlet names from titles (e.g., ' - Outlet' or ' | Outlet')."""
-    for sep in [" - ", " | "]:
-        parts = title.rsplit(sep, 1)
-        if len(parts) == 2 and len(parts[0]) > 20:
-            # If the suffix is a known domain or just short, strip it
-            if parts[1].strip().lower() in OUTLET_NAME_DOMAINS or len(parts[1]) < 20:
-                return parts[0]
-    return title
 
 
 def title_similarity(a: str, b: str) -> float:
@@ -196,43 +177,17 @@ def _parse_rss_items(rss: Optional[bytes], limit: int) -> List[Dict[str, str]]:
     return items
 
 
-_ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
-_DATE_SEGMENT_RE = re.compile(r"/(20\d{2})/(\d{2})/(\d{2})(?:/|$|\.)")
-
-
 def _parse_source_date(item: Dict[str, Any]) -> Optional[datetime]:
     """Publication time of a reference source: the RSS ``pubDate`` (exact)
-    first, then a full date embedded in the article URL. None = unknown
-    freshness -- unknown ages are never used to judge (or block) recency.
-
-    Lives here (not app.claim_analysis) because claim_analysis imports from
-    this module -- a top-level import would create a cycle.
+    first, then a full date embedded in the article URL -- both parsed by
+    the shared app.textnorm helpers (single source of truth with the claim
+    layer). None = unknown freshness -- unknown ages are never used to judge
+    (or block) recency.
     """
-    raw = (item.get("pub_date") or "").strip()
-    if raw:
-        try:
-            dt = parsedate_to_datetime(raw)
-        except (TypeError, ValueError):
-            dt = None
-        if dt is not None:
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    url = item.get("link", "") or ""
-    m = _ISO_DATE_RE.search(url)
-    if m:
-        y, mo, d = (int(part) for part in m.group(1).split("-"))
-        try:
-            return datetime(y, mo, d, tzinfo=timezone.utc)
-        except ValueError:
-            return None
-    m = _DATE_SEGMENT_RE.search(url)
-    if m:
-        try:
-            return datetime(
-                int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc
-            )
-        except ValueError:
-            return None
-    return None
+    pub = parse_rfc822(item.get("pub_date", ""))
+    if pub is not None:
+        return pub
+    return extract_url_date(item.get("link", ""))
 
 
 def median_source_age(
@@ -337,15 +292,42 @@ def retrieve_reference_sources(
     candidates: Dict[str, Dict[str, Any]] = {}
     target = claim_text or ""
 
+    # Fetch phase: every uncached query goes out in parallel (stdlib
+    # threads), so a thin-coverage claim -- exactly the case that needs all
+    # queries -- costs one round trip (~TIMEOUT) instead of
+    # max_queries x TIMEOUT serially. Cached queries cost nothing and every
+    # result is TTL-cached, so repeat checks stay at zero requests. The
+    # merge below stays sequential and ordered: output is deterministic
+    # regardless of which fetch finishes first. Trade-off: early-stopping
+    # now discards (already-fetched) later results instead of skipping the
+    # fetch -- at most cfg.max_queries RSS GETs per uncached claim.
+    plan: List[Any] = []          # (query, cache_key, items | None on miss)
+    uncached: List[str] = []
     for query in queries[: cfg.max_queries]:
         if not query or not _tokenize(query):
             continue
         cache_key = f"{region}:{query}"
         hit, items = rss_cache.get(cache_key)
+        plan.append((query, cache_key, items if hit else None))
         if not hit:
-            items = _parse_rss_items(
-                fetch(_google_news_url(query, region)), cfg.max_query_sources
-            )
+            uncached.append(query)
+
+    bodies: Dict[str, Optional[bytes]] = {}
+    if uncached:
+        with ThreadPoolExecutor(max_workers=min(len(uncached), 4)) as pool:
+            futures = {
+                pool.submit(fetch, _google_news_url(q, region)): q for q in uncached
+            }
+            for fut in as_completed(futures):
+                q = futures[fut]
+                try:
+                    bodies[q] = fut.result()
+                except Exception:
+                    bodies[q] = None  # a failing worker behaves like a failed fetch
+
+    for query, cache_key, items in plan:
+        if items is None:
+            items = _parse_rss_items(bodies.get(query), cfg.max_query_sources)
             # Never negative-cache: an empty result may be a transient
             # network failure, and caching it would suppress recovery on
             # the user's re-check.

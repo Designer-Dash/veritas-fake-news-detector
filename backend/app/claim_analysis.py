@@ -25,8 +25,10 @@ from typing import Any, Dict, List, Optional
 
 from .cache import get_cache
 from .config import get_config
-from .cross_check import STOPWORDS, _strip_source_suffix
 from .gemini_client import CallBudget, gemini_json
+from .textnorm import STOPWORDS, extract_url_date
+from .textnorm import parse_iso_date as _parse_iso_date
+from .textnorm import strip_source_suffix as _strip_source_suffix
 
 logger = logging.getLogger("veritas.claim")
 
@@ -409,19 +411,6 @@ _DATE_PATTERNS = [
 ]
 
 
-def _parse_iso_date(raw: str) -> Optional[datetime]:
-    raw = raw.strip().replace("Z", "+00:00")
-    if "/" in raw and re.match(r"^\d{4}/\d{2}/\d{2}", raw):
-        raw = raw.replace("/", "-")
-    try:
-        dt = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
 def _parse_human_date(raw: str) -> Optional[str]:
     """'30 September 2026' / 'September 30, 2026' -> '2026-09-30'."""
     raw = raw.strip().lower().replace(",", " ")
@@ -461,14 +450,8 @@ def extract_published_date(content: str, url: str = "") -> Optional[datetime]:
     m = re.search(r"/(20\d{2}/\d{2}/\d{2})/", content[:2048])
     if m:
         return _parse_iso_date(m.group(1))
-    # URL fallback: ISO date anywhere in the URL, or a full date segment.
+    # URL fallback: ISO date anywhere in the URL, or a full date segment
+    # (shared helper -- single source of truth with app.cross_check).
     if url:
-        m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", url)
-        if m:
-            dt = _parse_iso_date(m.group(1))
-            if dt:
-                return dt
-        m = re.search(r"/(20\d{2})/(\d{2})/(\d{2})(?:/|$|\.)", url)
-        if m:
-            return _parse_iso_date(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+        return extract_url_date(url)
     return None
