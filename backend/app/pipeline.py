@@ -1,20 +1,26 @@
 """Analysis pipeline: combine domain heuristics, stylometry, AI signals and
-cross-source corroboration into one explainable verdict.
+claim-based cross-source verification into one explainable verdict.
 
 Signature marker 008/013 · designer-dash
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from .ai_signals import scan_bytes, scan_html_for_media_flags, score_media_signals
-from .cross_check import links_to_trusted, search_trusted_coverage
+from .cache import get_cache
+from .claim_analysis import extract_claim, extract_published_date, generate_search_queries
+from .config import get_config
+from .cross_check import links_to_trusted, retrieve_reference_sources
 from .domain import AnalysisResult, Evidence, SourceMatch, verdict_from_suspicion
+from .gemini_client import CallBudget
 from .security import SecurityError, fetch_media_head, safe_fetch, validate_url
-from .sources import outlets_for_region
+from .sources import region_name
 from .text_analysis import (
     CLICKBAIT_PATTERNS,
     ai_stylometry,
@@ -24,6 +30,9 @@ from .text_analysis import (
     extract_text_from_html,
     phrase_hits,
 )
+from .verification import VerificationResult, get_final_verification_result
+
+logger = logging.getLogger("veritas.pipeline")
 
 # Domains with strong editorial accountability start with a trust bonus.
 KNOWN_TRUSTED_PATTERNS = (
@@ -180,58 +189,178 @@ def analyze(
         evidence.append(Evidence("Media provenance", "; ".join(media_reasons), media_weight))
     suspicion += media_weight
 
-    # 4. Cross-source corroboration ----------------------------------------
-    cross: Dict[str, Any] = {"score": 0.0, "matches": [], "region": region}
-    if include_cross_check and headline:
-        try:
-            cross = search_trusted_coverage(headline, region, page_domain=dom)
-        except Exception:
-            cross = {"score": 0.0, "matches": [], "region": region, "error": "cross-check failed"}
-
+    # 4. Claim-based cross-source verification (strongest 5-10 sources) ----
+    # Gemini handles structured analysis only (claim extraction + ONE batched
+    # comparison call); retrieval, scoring and the final Evidence Score are
+    # deterministic and happen in app.verification.
     trusted_links = links_to_trusted(html, region, page_domain=dom)
-    matches = cross.get("matches", [])
-    corroboration = cross.get("score", 0.0)
-    # Outbound links to trusted outlets are a weak hint only (the page's own
-    # network/footers can reference big outlets), never full corroboration.
-    link_hint = min(len(trusted_links) * 0.05, 0.30)
-    corroboration = min(max(corroboration, link_hint), 1.0)
+    cfg = get_config()
+    verification: Optional[VerificationResult] = None
 
-    if matches:
-        suspicion -= corroboration * 0.4
-        evidence.append(
-            Evidence(
-                "Cross-source check",
-                f"Corroborated by {len(matches)} trusted {cross.get('region', region)} "
-                f"outlet(s), match strength {corroboration:.2f}",
-                -corroboration * 0.4,
-                {"matches": matches},
+    if include_cross_check and headline:
+        budget = CallBudget(cfg.gemini_max_calls)
+        try:
+            # Extract the claim once (cached) and reuse it for queries,
+            # retrieval and every pairwise comparison.
+            claim = extract_claim(headline, text, budget=budget)
+            queries = generate_search_queries(claim, headline)
+            # Avoid re-verifying the same claim/page while the result is fresh.
+            vcache = get_cache("verification", maxsize=64, ttl=cfg.verification_cache_ttl)
+            vkey = hashlib.sha256(
+                "\x00".join((claim.claim, region, dom)).encode("utf-8", "ignore")
+            ).hexdigest()
+            hit, cached = vcache.get(vkey)
+            if hit:
+                verification = cached
+            else:
+                candidates = retrieve_reference_sources(
+                    claim.claim, queries, region=region, page_domain=dom, cfg=cfg
+                )
+                verification = get_final_verification_result(
+                    claim,
+                    candidates,
+                    region=region,
+                    published_date=extract_published_date(html, url=url),
+                    queries=queries,
+                    budget=budget,
+                    cfg=cfg,
+                )
+                vcache.set(vkey, verification)
+        except Exception:
+            # Fail gracefully (e.g. rate limits, malformed data): keep the
+            # existing heuristics and never surface an error as a verdict.
+            logger.warning("cross-source verification failed; degrading gracefully", exc_info=True)
+            verification = None
+
+    # Cross-source evidence: existing evidence copy, new weighted scoring.
+    region_label = region_name(region)
+    selected = verification.selected if verification is not None else 0
+    supports = verification.supports if verification is not None else []
+    contradicts_n = verification.contradict_count if verification is not None else 0
+    strength = (verification.e_final / 100.0) if verification is not None else 0.0
+    # Outbound links to trusted outlets are a weak hint only (the page's own
+    # footers can reference big outlets), never corroboration -- and they
+    # must never offset a contradiction (spec item 5).
+    link_credit = min(len(trusted_links) * 0.05, 0.30) * 0.2
+
+    def _compact_verification() -> Dict[str, Any]:
+        # Slim copy for evidence details; the full breakdown lives once in
+        # ai_signals["verification"] (avoid duplicating it in the payload).
+        return {
+            "state": verification.state,
+            "evidence_score": round(verification.e_final, 1),
+            "counts": {
+                "found": verification.examined,
+                "selected": verification.selected,
+                "supports": verification.support_count,
+                "contradicts": verification.contradict_count,
+                "unknown": verification.unknown_count,
+            },
+        }
+
+    if verification is not None and selected >= 1:
+        # Evidence score drives the suspicion delta: suspicion +=
+        # (0.5 - E/100) * slope. E = 50 is neutral; below 50 (thin or
+        # contradicting evidence) raises suspicion, above 50 lowers it.
+        cross_weight = (0.5 - strength) * cfg.cross_weight_slope
+        if supports:
+            evidence.append(
+                Evidence(
+                    "Cross-source check",
+                    f"Corroborated by {len(supports)} trusted {region_label} "
+                    f"outlet(s), match strength {strength:.2f}",
+                    cross_weight,
+                    {
+                        "matches": [s.to_dict() for s in supports[:4]],
+                        "verification": _compact_verification(),
+                    },
+                )
             )
-        )
+        elif trusted_links and contradicts_n == 0:
+            # Unknown coverage only: the link hint may still nudge slightly.
+            evidence.append(
+                Evidence(
+                    "Cross-source check",
+                    f"No direct coverage match, but the page references "
+                    f"{len(trusted_links)} trusted outlet(s)",
+                    cross_weight - link_credit,
+                    {"verification": _compact_verification()},
+                )
+            )
+        else:
+            # Contradicting or non-matching coverage: never dressed up as a
+            # link-hint reduction; weight follows the evidence score.
+            evidence.append(
+                Evidence(
+                    "Cross-source check",
+                    f"No matching coverage found in trusted {region_label} outlets "
+                    f"({selected} results examined)",
+                    cross_weight,
+                    {"verification": _compact_verification()},
+                )
+            )
     elif trusted_links:
-        suspicion -= corroboration * 0.2
         evidence.append(
             Evidence(
                 "Cross-source check",
                 f"No direct coverage match, but the page references "
                 f"{len(trusted_links)} trusted outlet(s)",
-                -corroboration * 0.2,
+                -link_credit,
             )
         )
+        cross_weight = -link_credit
     else:
-        suspicion += 0.15
+        # No usable reference source: never invent evidence and never label
+        # the article fake for it. Very recent (breaking) stories are
+        # penalized less for missing coverage (spec items 9 & 12).
+        if verification is not None and verification.breaking:
+            cross_weight = cfg.breaking_no_coverage_penalty
+        else:
+            cross_weight = cfg.no_coverage_penalty
         evidence.append(
             Evidence(
                 "Cross-source check",
-                f"No matching coverage found in trusted {cross.get('region', region)} outlets "
-                f"({cross.get('checked', 0)} results examined)",
-                0.15,
+                f"No matching coverage found in trusted {region_label} outlets "
+                f"(0 results examined)",
+                cross_weight,
+                _compact_verification() if verification is not None else None,
             )
         )
+    suspicion += cross_weight
+
     ai_signals["cross_check"] = {
-        "score": cross.get("score"),
-        "checked": cross.get("checked"),
+        # 0.0 with no selected sources: no data must not read as weak evidence
+        "score": round(strength, 3) if selected >= 1 else 0.0,
+        "checked": selected,
         "trusted_links_on_page": trusted_links[:5],
+        "state": verification.state if verification is not None else "disabled",
+        "evidence_score": (
+            round(verification.e_final, 1) if verification is not None else None
+        ),
     }
+    if verification is not None:
+        # Full structured breakdown (components, per-source relationships,
+        # weights, breaking-news state) for debugging and future UI use.
+        ai_signals["verification"] = verification.to_dict()
+        logger.debug(
+            "verification: state=%s found=%d selected=%d supports=%d "
+            "contradicts=%d unknown=%d M=%.1f C=%.1f F=%.1f S=%.1f "
+            "E=%.1f e_final=%.1f penalty=%s breaking=%s",
+            verification.state,
+            verification.examined,
+            verification.selected,
+            verification.support_count,
+            verification.contradict_count,
+            verification.unknown_count,
+            verification.M,
+            verification.C,
+            verification.F,
+            verification.S,
+            verification.E,
+            verification.e_final,
+            verification.penalty_applied,
+            verification.breaking,
+        )
 
     # 5. Final verdict ------------------------------------------------------
     suspicion = min(max(suspicion, 0.0), 1.0)
@@ -241,13 +370,21 @@ def analyze(
     confidence = 0.55
     if not styl["low_signal"]:
         confidence += 0.15
-    if cross.get("matches"):
+    if verification is not None and selected >= 1:
         confidence += 0.15
     if rep["reasons"]:
         confidence += 0.05
     confidence = min(confidence, 0.95)
 
-    matches = [SourceMatch(**m) for m in cross.get("matches", [])[:4]]
+    matches = [
+        SourceMatch(
+            outlet=s.outlet,
+            url=s.url,
+            similarity=round(s.similarity / 100.0, 3),
+            title=s.title,
+        )
+        for s in supports[:4]
+    ]
     summary = build_summary(verdict, suspicion, evidence)
 
     return AnalysisResult(

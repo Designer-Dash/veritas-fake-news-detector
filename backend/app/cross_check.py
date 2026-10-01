@@ -1,18 +1,20 @@
-"""Cross-source corroboration against trusted regional outlets.
+"""Cross-source corroboration against a pool of reference outlets.
 
-For a given headline we:
-  1. Build a news search query (Google News RSS -- no API key needed).
-  2. Fetch top results, restricted to trusted outlet domains (resolved from
-     the RSS outlet *display name* -- Google News links are JS redirects that
-     cannot be fetched server-side).
-  3. Score title similarity (token Jaccard + difflib ratio on normalized
-     titles), optionally body similarity when a direct article URL exists.
-  4. Aggregate into a corroboration score.
+For a given claim we:
+  1. Build 2-3 optimized news search queries (Google News RSS -- no API key).
+  2. Fetch results (capped per query, early-stopping once enough relevant
+     results exist; repeated searches answered from a TTL cache).
+  3. Resolve each result's outlet, exclude the analyzed page's own outlet,
+     and rank by claim relevance (token Jaccard + difflib ratio on
+     normalized strings -- wording-tolerant, never exact matching).
+  4. Return the strongest relevant candidates (capped at cfg.max_sources,
+     default 10) for the verification layer to classify and score.
 
-If no trusted outlet covers the story, that alone is weak evidence -- small
-local stories exist -- so it contributes a small weight and lowers confidence.
-The analyzed page's own outlet is always excluded: its headline appearing in
-the news index is not corroboration.
+If no outlet covers the story, that alone is weak evidence -- small local
+stories exist -- so it contributes only a small weight downstream and never
+labels an article fake by itself (see app.verification).
+
+Spec: retrieveReferenceSources() lives here.
 
 Signature marker 005/013 · designer-dash
 """
@@ -25,9 +27,10 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
+from .cache import get_cache
+from .config import get_config
 from .security import safe_fetch
-from .sources import outlets_for_region, region_name
-from .text_analysis import extract_text_from_html
+from .sources import outlets_for_region
 
 USER_AGENT = (
     "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)"
@@ -91,13 +94,6 @@ def _normalize_text(text: str) -> str:
 def _tokenize(text: str) -> List[str]:
     words = re.findall(r"[a-z0-9]{3,}", _normalize_text(text))
     return [w for w in words if w not in STOPWORDS]
-
-
-def _shingles(text: str, k: int = 5) -> set:
-    toks = _tokenize(text)
-    if len(toks) < k:
-        return set()
-    return {" ".join(toks[i : i + k]) for i in range(len(toks) - k + 1)}
 
 
 def jaccard(a: set, b: set) -> float:
@@ -195,101 +191,112 @@ def _parse_rss_items(rss: Optional[bytes], limit: int) -> List[Dict[str, str]]:
     return items
 
 
-def search_trusted_coverage(
-    headline: str, region: str, limit: int = 12, page_domain: str = ""
-) -> Dict[str, Any]:
-    """Search trusted outlets for the story. Returns matches + aggregate score.
+def _slug(text: str) -> str:
+    """Alphanumeric slug for fuzzy outlet-vs-own-domain comparisons."""
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
-    `page_domain` excludes the analyzed page's own outlet from matches -- its
-    own headline appearing in the news index is not corroboration. If the
-    first query yields nothing, one fallback query built from the headline's
-    most distinctive tokens is tried (capped at 2 RSS requests total).
+
+def _resolve_outlet_domain(it: Dict[str, str], region: str) -> str:
+    """Best-effort outlet domain for weighting/own-outlet exclusion.
+
+    Google News RSS links are JS redirects that cannot be fetched
+    server-side, so the outlet is resolved from its display name first,
+    then from a direct article URL, then from the trusted-domain list.
+    Returns "" when the outlet is unknown (weight 0.40 downstream).
     """
-    query = " ".join(_tokenize(headline)[:12])
-    empty = {"matches": [], "score": 0.0, "checked": 0, "region": region_name(region)}
-    if not query:
-        return empty
-
-    trusted_domains = outlets_for_region(region)
-    own_base = _registrable(page_domain) if page_domain else ""
-    matches: List[Dict[str, Any]] = []
-    best_sim = 0.0
-    checked = 0
-
-    def resolve_domain(it: Dict[str, str]) -> str:
-        name = it.get("outlet", "").strip().lower()
-        if name in OUTLET_NAME_DOMAINS:
-            return OUTLET_NAME_DOMAINS[name]
-        blob = (it.get("link", "") + " " + name).lower()
-        for t in trusted_domains:
-            if t in blob:
+    name = (it.get("outlet") or "").strip().lower()
+    if name in OUTLET_NAME_DOMAINS:
+        return OUTLET_NAME_DOMAINS[name]
+    link = it.get("link", "")
+    if link and "news.google.com" not in link:
+        host = urllib.parse.urlparse(link).netloc.lower().split(":")[0]
+        if host:
+            return host
+    blob = (link + " " + name).lower()
+    trusted = outlets_for_region(region)
+    for t in trusted:
+        if t in blob:
+            return t
+    slug = _slug(name)
+    if slug:
+        for t in trusted:
+            if t.split(".")[0] and t.split(".")[0] in slug:
                 return t
-        return ""
+    return ""
 
-    def match_items(items: List[Dict[str, str]]) -> None:
-        nonlocal best_sim
+
+def retrieve_reference_sources(
+    claim_text: str,
+    queries: List[str],
+    region: str,
+    page_domain: str = "",
+    cfg=None,
+) -> List[Dict[str, Any]]:
+    """Search the reference-source pool for a claim (spec:
+    retrieveReferenceSources()).
+
+    Runs up to cfg.max_queries (2-3) optimized RSS queries with an early
+    stop once enough relevant results exist, deduplicates per outlet,
+    excludes the analyzed page's own outlet, ranks by relevance to the
+    claim, and returns the strongest relevant candidates (uncapped here;
+    the verification layer keeps at most cfg.max_sources = 10).
+
+    Repeated searches are answered from a TTL cache, so re-checking the
+    same claim costs zero extra requests.
+    """
+    cfg = cfg or get_config()
+    own_base = _registrable(page_domain) if page_domain else ""
+    own_slug = _slug(page_domain)
+    rss_cache = get_cache("rss", maxsize=512, ttl=cfg.rss_cache_ttl)
+    candidates: Dict[str, Dict[str, Any]] = {}
+    target = claim_text or ""
+
+    for query in queries[: cfg.max_queries]:
+        if not query or not _tokenize(query):
+            continue
+        cache_key = f"{region}:{query}"
+        hit, items = rss_cache.get(cache_key)
+        if not hit:
+            items = _parse_rss_items(
+                _fetch(_google_news_url(query, region)), cfg.max_query_sources
+            )
+            # Never negative-cache: an empty result may be a transient
+            # network failure, and caching it would suppress recovery on
+            # the user's re-check.
+            if items:
+                rss_cache.set(cache_key, items)
+
         for it in items:
-            domain = resolve_domain(it)
-            if not domain:
-                continue
-            if own_base and _registrable(domain) == own_base:
+            domain = _resolve_outlet_domain(it, region)
+            if own_base and domain and _registrable(domain) == own_base:
                 continue  # the page's own outlet re-reporting itself is circular
-            sim = title_similarity(headline, it["title"])
-            shared = len(set(_tokenize(headline)) & set(_tokenize(it["title"])))
+            outlet = it.get("outlet", "") or domain or it.get("link", "")
+            if not domain and own_slug:
+                out_slug = _slug(outlet)
+                if out_slug and (out_slug in own_slug or own_slug in out_slug):
+                    continue
+            sim = title_similarity(target, it["title"])
+            # Relevance: above the floor AND shares at least one content
+            # word with the claim (pure noise never enters the pool).
+            shared = len(set(_tokenize(target)) & set(_tokenize(it["title"])))
+            if sim < cfg.retrieval_floor or shared < 1:
+                continue
+            # One candidate per outlet (keeping its best match): independent
+            # sources matter, the same outlet reporting twice does not.
+            key = (outlet or "").strip().lower() or (it.get("link") or it["title"]).lower()
+            prev = candidates.get(key)
+            if prev is None or prev["similarity"] < sim:
+                candidates[key] = {
+                    "outlet": outlet,
+                    "domain": domain,
+                    "url": it.get("link", ""),
+                    "title": it["title"][:200],
+                    "similarity": round(sim, 3),
+                }
 
-            # If RSS gave a direct (non-Google) article URL, body text similarity
-            # is the stronger signal -- fetch and compare, keep the best of the two.
-            link = it["link"]
-            if link and "news.google.com" not in link:
-                body = _fetch(link)
-                if body:
-                    body_sim = jaccard(
-                        _shingles(extract_text_from_html(body.decode("utf-8", errors="ignore"))),
-                        _shingles(headline),
-                    )
-                    sim = max(sim, body_sim)
+        # Early stop: enough relevant results to pick the strongest 5-10.
+        if len(candidates) >= cfg.max_sources + 5:
+            break
 
-            if sim >= 0.15 and shared >= 1:
-                best_sim = max(best_sim, sim)
-                matches.append(
-                    {
-                        "outlet": it["outlet"] or domain,
-                        "url": link,
-                        "similarity": round(sim, 3),
-                        "title": it["title"][:200],
-                    }
-                )
-
-    items = _parse_rss_items(_fetch(_google_news_url(query, region)), limit)
-    checked += len(items)
-    match_items(items)
-
-    if not matches:
-        # Fallback: retry with the most distinctive (longest) headline tokens.
-        q2 = " ".join(sorted(set(_tokenize(headline)), key=len, reverse=True)[:4])
-        if q2 and q2 != query:
-            items2 = _parse_rss_items(_fetch(_google_news_url(q2, region)), limit)
-            seen = {it["title"] for it in items}
-            items2 = [it for it in items2 if it["title"] not in seen]
-            checked += len(items2)
-            match_items(items2)
-
-    matches.sort(key=lambda m: m["similarity"], reverse=True)
-    # Dedupe by outlet keeping the best match per outlet.
-    best_per_outlet: Dict[str, Dict[str, Any]] = {}
-    for m in matches:
-        key = m["outlet"]
-        if key not in best_per_outlet or m["similarity"] > best_per_outlet[key]["similarity"]:
-            best_per_outlet[key] = m
-    matches = list(best_per_outlet.values())
-
-    # Diminishing returns: one strong match counts a lot, extra matches less.
-    score = 0.0
-    for i, m in enumerate(matches[:4]):
-        score += m["similarity"] * (0.5 ** i)
-    return {
-        "matches": matches[:5],
-        "score": round(min(score, 1.0), 3),
-        "checked": checked,
-        "region": region_name(region),
-    }
+    ranked = sorted(candidates.values(), key=lambda c: c["similarity"], reverse=True)
+    return ranked

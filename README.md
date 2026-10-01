@@ -13,13 +13,36 @@ it, and links to trusted coverage of the same story.
 |---|---|---|
 | **Media provenance** | C2PA / Content Credentials manifests, IPTC *Digital Source Type* codes, generator EXIF/XMP markers (Midjourney, Stable Diffusion, Firefly…), SynthID-style byte markers | IPTC/C2PA standards; watermark-survey literature |
 | **AI-writing cues** | Sentence-length burstiness, vocabulary richness, stock LLM phrases, emoji/hashtag/clickbait density | Stylometric fake-news detection (e.g. `s41598-021-03100-6`) |
-| **Cross-source corroboration** | Story matched against Google News coverage **restricted to trusted regional outlets** (India: TOI, India Today, The Hindu, NDTV, HT, Reuters, AP…), shingle-overlap similarity | Explainable multi-source verification (`s41599-025-05389-4`) |
+| **Cross-source corroboration** | The underlying **claim** is extracted (Gemini when a key is configured, deterministic fallback otherwise), searched against the reference-outlet pool with 2–3 optimized queries, and the strongest **5–10 sources** are compared by semantic similarity — not exact headline matching — then scored as weighted SUPPORTS / CONTRADICTS / UNKNOWN consensus | Explainable multi-source verification (`s41599-025-05389-4`) |
 | **Domain reputation** | Known trusted outlets get a bonus; lookalike TLDs (`.com.co`, `.news`, `.xyz`), hyphen-heavy and blog-mashup domains get penalties | Classic fake-news feature work |
 
 Every signal contributes a signed weight; the sum is a **suspicion score** mapped
 to four verdicts: `trusted → uncertain → suspicious → fake`. All evidence is
 returned so the UI can *explain* the verdict (explainability was the core theme
 of your base paper).
+
+### Evidence scoring (claim-based verification)
+
+The cross-source layer computes a deterministic **Evidence Score** `E` (0–100,
+not a probability of truth) from four normalized components:
+
+```
+E = 0.30·M + 0.30·C + 0.20·F + 0.20·S
+
+M = semantic similarity of the claim to the strongest relevant sources
+C = weighted cross-source consensus  ((A + 0.5·U) / (A + U + D)) × 100
+F = factual consistency (dates/numbers/entities/locations across sources)
+S = source-quality score (configurable trust tiers: 1.00 / 0.85 / 0.65 / 0.40)
+```
+
+A strong contradiction from a high-weight trusted source applies a flat
+configurable penalty (−15) so weak sources cannot bury it. Very recent
+stories with thin coverage are marked internally `BREAKING_NEWS` /
+`EARLY_REPORT`, thin pools (< 5 sources) become `INSUFFICIENT_EVIDENCE`,
+and neither is treated as evidence against the article. Gemini is used only
+for structured analysis (claim extraction, batched pairwise comparison) —
+the score itself is always computed by the backend. All thresholds and
+weights live in `backend/app/config.py` and are env-tunable (`VERITAS_*`).
 
 ## Repository layout
 
@@ -30,8 +53,13 @@ backend/
     pipeline.py      Combines all signals into one explainable verdict
     ai_signals.py    C2PA / IPTC DST / SynthID / generator-marker scanning
     text_analysis.py Stylometry + clickbait/hedging heuristics (no deps)
-    cross_check.py   Google News RSS search + trusted-outlet matching
-    sources.py       Trusted-outlet registry by region (India-first)
+    claim_analysis.py  Claim extraction/normalization + search queries (Gemini or fallback)
+    cross_check.py   Google News RSS retrieval of the strongest 5-10 reference sources
+    verification.py  Deterministic evidence scoring: M/C/F/S/E, consensus, penalties
+    config.py        All scoring thresholds/weights (env-tunable VERITAS_*)
+    gemini_client.py Budgeted/cached Gemini JSON client (analysis only, never verdicts)
+    cache.py         TTL caches: claims, RSS results, verifications
+    sources.py       Trusted-outlet registry + configurable source-weight tiers
     domain.py        Dataclasses: Evidence, SourceMatch, AnalysisResult
   requirements.txt
 
@@ -78,10 +106,14 @@ cd backend
 python -m pytest -q
 ```
 
-20 deterministic, offline tests cover text extraction/scoring, cross-check
-similarity and self-outlet exclusion, pipeline verdicts (with mocked network),
-and the API contract. Live behavior against real news pages is verified
-separately (see the live-test reports in the project history).
+105 deterministic, offline tests cover text extraction/scoring, cross-check
+similarity and self-outlet exclusion, claim extraction/normalization,
+consensus/evidence-score math, contradiction penalties, breaking-news
+detection, source weighting, retrieval caps, pipeline verdicts (with mocked
+network), and the API contract. Gemini is force-disabled in tests; its HTTP
+call is covered with a mocked transport. Live behavior against real news
+pages is verified separately (see the live-test reports in the project
+history).
 
 > **Architecture note:** the content script never calls the backend directly.
 > On an HTTPS page that fetch would be blocked as mixed content (verified in
