@@ -330,13 +330,18 @@ def analyze(
                 )
             )
         elif trusted_links and contradicts_n == 0:
-            # Unknown coverage only: the link hint may still nudge slightly.
+            # Unknown coverage only: the link hint may still nudge slightly --
+            # and the nudge is applied for real: the Evidence weight below and
+            # `suspicion += cross_weight` agree (README: every signed weight is
+            # part of the sum). Applied ONLY inside this guard: the link hint
+            # must never offset a contradiction (spec item 5).
+            cross_weight -= link_credit
             evidence.append(
                 Evidence(
                     "Cross-source check",
                     f"No direct coverage match, but the page references "
                     f"{len(trusted_links)} trusted outlet(s)",
-                    cross_weight - link_credit,
+                    cross_weight,
                     {"verification": _compact_verification()},
                 )
             )

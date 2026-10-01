@@ -1121,3 +1121,76 @@ def test_stale_coverage_never_becomes_breaking_news(monkeypatch):
     assert info["median_source_age_hours"] is not None
     assert info["median_source_age_hours"] > get_config().breaking_max_median_age_hours
     assert "stale" in info["reason"]
+
+
+# ---------------------------------------------------------------------------
+# ERR-1: evidence weight must equal its suspicion delta (explainability)
+# ---------------------------------------------------------------------------
+
+def test_unknown_coverage_with_links_weight_consistency(monkeypatch):
+    """Unknown coverage + footer link: the nudge *shown* in the evidence list
+    must be the nudge actually *applied* to suspicion (README: "every signal
+    contributes a signed weight; the sum is a suspicion score").
+
+    Two runs of the identical article differ only in one href: tags are
+    stripped before scoring, so every other signal is identical and the
+    delta isolates the link-hint arithmetic in the
+    `contradicts_n == 0` branch.
+    """
+    from app.pipeline import analyze
+
+    # One retrieved source that is UNKNOWN for the claim: shares retrieval
+    # tokens (iranian, boat) but is neither close enough to support it nor
+    # denial-worded to contradict it.
+    rss = (
+        "<rss><channel>"
+        "<item><title>Iranian boat crew questioned at Mumbai port in separate case</title>"
+        "<link>https://news.google.com/rss/articles/9</link>"
+        "<source>India Today</source></item>"
+        "</channel></rss>"
+    ).encode()
+    _mock_retrieval(monkeypatch, rss)
+
+    template = (
+        "<html><head><title>Rs 3,000 crore drugs seized from Iranian boat</title></head>"
+        "<body><article><p>"
+        + "Officials said the seizure happened on Monday. " * 15
+        + '</p></article><a href="{href}">see also</a></body></html>'
+    )
+    trusted_href = "https://www.ndtv.com/another-story"      # trusted for region "in"
+    plain_href = "https://www.widget-vendor.test/another-story"  # not trusted
+
+    url = "https://city-voice.in/drugs-boat.html"
+    with_link = analyze(url, region="in", html=template.format(href=trusted_href))
+    without = analyze(url, region="in", html=template.format(href=plain_href))
+
+    # Branch preconditions: >=1 selected source, 0 SUPPORTS, 0 CONTRADICTS,
+    # and the trusted-link hint present only in the first run.
+    counts = with_link.ai_signals["verification"]["counts"]
+    assert counts["selected"] >= 1
+    assert counts["supports"] == 0
+    assert counts["contradicts"] == 0
+    assert with_link.ai_signals["cross_check"]["trusted_links_on_page"]
+    assert not without.ai_signals["cross_check"]["trusted_links_on_page"]
+
+    def _cross(result):
+        items = [e for e in result.evidence if e.source == "Cross-source check"]
+        assert len(items) == 1
+        return items[0]
+
+    cw, cwo = _cross(with_link), _cross(without)
+    link_credit = min(1 * 0.05, 0.30) * 0.2  # one trusted link -> 0.01
+
+    # The nudge is visible in the evidence weight...
+    assert cw.weight == pytest.approx(cwo.weight - link_credit, abs=1e-9)
+    # ...and it is exactly the amount suspicion moved (the ERR-1 fix)...
+    assert (with_link.suspicion - without.suspicion) == pytest.approx(
+        -link_credit, abs=1e-9
+    )
+    # ...so evidence-weight delta == suspicion delta for this branch.
+    assert (cw.weight - cwo.weight) == pytest.approx(
+        with_link.suspicion - without.suspicion, abs=1e-9
+    )
+    # Contradiction-safety untouched: nudge only ever *reduces* suspicion,
+    # and never appears when the pool contradicts (guard still in place).
+    assert link_credit > 0 and cw.weight <= cwo.weight
