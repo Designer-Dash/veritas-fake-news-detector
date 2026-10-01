@@ -552,10 +552,20 @@ RSS_ITEM = """
 """
 
 
-def _mock_safe_fetch(monkeypatch, body):
+def _mock_cc_fetch(monkeypatch, body):
+    """Direct cross_check unit tests: patch the module's own fetch (its
+    default boundary when no fetch_func is injected)."""
     import app.cross_check as cc
 
     monkeypatch.setattr(cc, "safe_fetch", lambda url, **kw: body)
+
+
+def _mock_retrieval(monkeypatch, body):
+    """Pipeline tests: ONE patch at the SourceRetriever boundary -- no
+    module-by-module safe_fetch chasing, no cross_check patching."""
+    import app.pipeline as pl
+
+    monkeypatch.setattr(pl.SourceRetriever, "fetch", lambda url, **kw: body)
 
 
 def test_retrieve_reference_sources_excludes_own_outlet_and_noise(monkeypatch):
@@ -580,7 +590,7 @@ def test_retrieve_reference_sources_excludes_own_outlet_and_noise(monkeypatch):
             ),
         ]
     ).encode()
-    _mock_safe_fetch(monkeypatch, f"<rss><channel>{items}</channel></rss>".encode())
+    _mock_cc_fetch(monkeypatch, f"<rss><channel>{items}</channel></rss>".encode())
 
     results = retrieve_reference_sources(
         _DRUGS_CLAIM,
@@ -602,7 +612,7 @@ def test_retrieve_reference_sources_does_not_negative_cache(monkeypatch):
     from app.cross_check import retrieve_reference_sources
 
     # First call: network failure (empty RSS). Second call: network back.
-    _mock_safe_fetch(monkeypatch, None)
+    _mock_cc_fetch(monkeypatch, None)
     first = retrieve_reference_sources(
         _DRUGS_CLAIM, ["rs 3000 crore drugs seized iranian boat"],
         region="in", page_domain="example.com",
@@ -614,7 +624,7 @@ def test_retrieve_reference_sources_does_not_negative_cache(monkeypatch):
         link="https://news.google.com/rss/articles/1",
         outlet="India Today",
     )
-    _mock_safe_fetch(monkeypatch, f"<rss><channel>{item}</channel></rss>".encode())
+    _mock_cc_fetch(monkeypatch, f"<rss><channel>{item}</channel></rss>".encode())
     second = retrieve_reference_sources(
         _DRUGS_CLAIM, ["rs 3000 crore drugs seized iranian boat"],
         region="in", page_domain="example.com",
@@ -637,7 +647,7 @@ def test_retrieve_reference_sources_caps_and_stops_early(monkeypatch):
         )
         for i, outlet in enumerate(outlets)
     ).encode()
-    _mock_safe_fetch(monkeypatch, f"<rss><channel>{many}</channel></rss>".encode())
+    _mock_cc_fetch(monkeypatch, f"<rss><channel>{many}</channel></rss>".encode())
 
     results = retrieve_reference_sources(
         _DRUGS_CLAIM, ["q1", "q2", "q3"], region="in", page_domain="example.com"
@@ -653,7 +663,6 @@ def test_retrieve_reference_sources_caps_and_stops_early(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_pipeline_contradiction_not_masked_by_trusted_links(monkeypatch):
-    import app.pipeline as pl
     from app.pipeline import analyze
 
     contras = (
@@ -664,8 +673,7 @@ def test_pipeline_contradiction_not_masked_by_trusted_links(monkeypatch):
         "<link>https://news.google.com/rss/articles/2</link><source>NDTV</source></item>"
         "</channel></rss>"
     ).encode()
-    _mock_safe_fetch(monkeypatch, contras)
-    monkeypatch.setattr(pl, "safe_fetch", lambda url, **kw: None)
+    _mock_retrieval(monkeypatch, contras)
 
     html = (
         "<html><head><title>5 killed in road accident in Uttar Pradesh</title></head><body>"
@@ -694,11 +702,9 @@ def test_pipeline_contradiction_not_masked_by_trusted_links(monkeypatch):
 
 
 def test_pipeline_reports_zero_score_when_no_sources(monkeypatch):
-    import app.pipeline as pl
     from app.pipeline import analyze
 
-    _mock_safe_fetch(monkeypatch, b"<rss><channel></channel></rss>")
-    monkeypatch.setattr(pl, "safe_fetch", lambda url, **kw: None)
+    _mock_retrieval(monkeypatch, b"<rss><channel></channel></rss>")
     html = (
         "<html><head><title>Completely made up story about aliens</title></head><body>"
         "<article><p>" + "Officials allegedly denied everything. " * 20 + "</p></article></body></html>"
@@ -869,8 +875,6 @@ def test_full_pipeline_with_gemini_uses_exactly_two_calls(monkeypatch):
     the per-request budget; Gemini values feed the deterministic score."""
     import json as _json
 
-    import app.pipeline as pl
-
     from app.pipeline import analyze
 
     _enable_gemini(monkeypatch)
@@ -879,8 +883,7 @@ def test_full_pipeline_with_gemini_uses_exactly_two_calls(monkeypatch):
         link="https://news.google.com/rss/articles/1",
         outlet="India Today",
     ).encode()
-    _mock_safe_fetch(monkeypatch, f"<rss><channel>{rss}</channel></rss>".encode())
-    monkeypatch.setattr(pl, "safe_fetch", lambda url, **kw: None)
+    _mock_retrieval(monkeypatch, f"<rss><channel>{rss}</channel></rss>".encode())
 
     calls = []
 
@@ -931,3 +934,190 @@ def test_full_pipeline_with_gemini_uses_exactly_two_calls(monkeypatch):
     assert v["sources"][0]["compared_by"] == "gemini"
     assert result.ai_signals["cross_check"]["checked"] == 1
     assert 0 <= v["evidence_score"] <= 100
+
+
+# ---------------------------------------------------------------------------
+# SourceRetriever: ONE injectable retrieval boundary
+# ---------------------------------------------------------------------------
+
+_DRUGS_HTML = (
+    "<html><head><title>Rs 3,000 crore drugs seized from Iranian boat</title></head>"
+    "<body><article><p>"
+    + "Officials said the seizure happened on Monday. " * 15
+    + "</p></article></body></html>"
+)
+
+_DRUGS_RSS = (
+    "<rss><channel>"
+    "<item><title>526 kg drugs worth Rs 3,000 crore seized from Iranian boat - India Today</title>"
+    "<link>https://news.google.com/rss/articles/1</link>"
+    "<source>India Today</source></item>"
+    "</channel></rss>"
+).encode()
+
+
+def test_source_retriever_needs_exactly_one_patch(monkeypatch):
+    """Retrieval is mocked at a single boundary -- no cc.safe_fetch +
+    pl.safe_fetch double patching -- and the deep page boundary stays unused."""
+    import app.pipeline as pl
+    from app.pipeline import SourceRetriever, analyze
+
+    calls = []
+
+    def fake_fetch(url, **kw):
+        calls.append(url)
+        return _DRUGS_RSS
+
+    monkeypatch.setattr(SourceRetriever, "fetch", fake_fetch)
+
+    def boom(*a, **kw):
+        raise AssertionError("page fetch must not be reached when html is supplied")
+
+    monkeypatch.setattr(pl, "safe_fetch", boom)
+
+    result = analyze("https://city-voice.in/drugs-boat.html", region="in", html=_DRUGS_HTML)
+    assert calls and all("news.google.com" in u for u in calls)  # went through the boundary
+    assert result.ai_signals["cross_check"]["checked"] >= 1
+    assert any(m.outlet == "India Today" for m in result.corroborating_sources)
+
+
+def test_source_retriever_accepts_injected_fetch_func():
+    """A future backend (Bing News, a fact-check API) plugs in via
+    fetch_func -- no monkeypatching, no core-logic changes."""
+    from app.pipeline import SourceRetriever
+
+    retriever = SourceRetriever(fetch_func=lambda url, **kw: _DRUGS_RSS)
+    results = retriever.retrieve(
+        "rs 3000 crore drugs seized iranian boat",
+        ["rs 3000 crore drugs seized iranian boat"],
+        region="in",
+    )
+    assert results and results[0]["outlet"] == "India Today"
+
+
+# ---------------------------------------------------------------------------
+# Developer debug payload (VERITAS_DEBUG=1, internal only)
+# ---------------------------------------------------------------------------
+
+def test_debug_payload_json_only_when_veritas_debug_enabled(monkeypatch, caplog):
+    import json as _json
+    import logging as _logging
+
+    from app.pipeline import analyze
+
+    _mock_retrieval(monkeypatch, _DRUGS_RSS)
+
+    with caplog.at_level(_logging.DEBUG, logger="veritas.pipeline"):
+        analyze("https://city-voice.in/drugs-boat.html", region="in", html=_DRUGS_HTML)
+    assert not [r for r in caplog.records if "debug_payload:" in r.getMessage()]
+    caplog.clear()
+
+    monkeypatch.setenv("VERITAS_DEBUG", "1")
+    with caplog.at_level(_logging.DEBUG, logger="veritas.pipeline"):
+        result = analyze("https://city-voice.in/drugs-boat.html", region="in", html=_DRUGS_HTML)
+
+    raw = [r.getMessage().split("debug_payload: ", 1)[1]
+           for r in caplog.records if "debug_payload: " in r.getMessage()]
+    assert len(raw) == 1
+    payload = _json.loads(raw[0])  # single JSON-serializable object
+    for key in ("claim", "sources_checked", "sources", "evidence", "verdict",
+                "suspicion", "cross_weight"):
+        assert key in payload
+    for key in ("M", "C", "F", "S", "E", "state", "breaking"):
+        assert key in payload["evidence"]
+    assert payload["verdict"] == result.verdict
+    assert payload["sources_checked"] >= 1
+    assert isinstance(payload["evidence"]["M"], (int, float))
+    assert payload["sources"][0]["relationship"] in (SUPPORTS, CONTRADICTS, UNKNOWN)
+
+
+# ---------------------------------------------------------------------------
+# Breaking news: source freshness, not just article recency
+# ---------------------------------------------------------------------------
+
+def test_breaking_news_gated_by_stale_source_pool():
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    # Recent article, thin coverage, but the pool is a day old: recycled
+    # coverage of an older event -- not a fresh story.
+    stale = detect_breaking_news(
+        now - timedelta(hours=3), 1, now=now, median_source_age_hours=26.0
+    )
+    assert stale["is_breaking"] is False
+    assert "stale" in stale["reason"]
+    # Fresh pool: still breaking.
+    fresh = detect_breaking_news(
+        now - timedelta(hours=3), 1, now=now, median_source_age_hours=0.5
+    )
+    assert fresh["is_breaking"] is True
+    # Unknown pool freshness never blocks (same rule as unknown article dates).
+    unknown = detect_breaking_news(now - timedelta(hours=3), 1, now=now)
+    assert unknown["is_breaking"] is True
+    assert unknown["median_source_age_hours"] is None
+
+
+def test_retrieval_tracks_source_age_and_median(monkeypatch):
+    from app.cross_check import median_source_age, retrieve_reference_sources
+
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    claim = "Rs 3,000 crore drugs seized from Iranian boat"
+    rss = (
+        "<rss><channel>"
+        "<item><title>526 kg drugs worth Rs 3,000 crore seized from Iranian boat - India Today</title>"
+        "<link>https://news.google.com/rss/articles/1</link>"
+        "<source>India Today</source><pubDate>01 Oct 2026 11:00:00 GMT</pubDate></item>"
+        "<item><title>Rs 3,000 crore drugs seized from Iranian boat in Arabian Sea - NDTV</title>"
+        "<link>https://news.google.com/rss/articles/2</link>"
+        "<source>NDTV</source><pubDate>01 Oct 2026 10:30:00 GMT</pubDate></item>"
+        "<item><title>Rs 3,000 crore drugs seized from Iranian boat: police - Hindustan Times</title>"
+        "<link>https://www.hindustantimes.com/2026/09/25/drugs-boat/story.html</link>"
+        "<source>Hindustan Times</source></item>"
+        "</channel></rss>"
+    ).encode()
+    _mock_cc_fetch(monkeypatch, rss)
+
+    results = retrieve_reference_sources(
+        claim, [claim], region="in", page_domain="example.com", now=now
+    )
+    ages = {r["outlet"]: r["age_hours"] for r in results}
+    assert ages["India Today"] == pytest.approx(1.0)      # RSS pubDate (exact)
+    assert ages["NDTV"] == pytest.approx(1.5)
+    # No pubDate -> full date parsed from the article URL path.
+    assert ages["Hindustan Times"] == pytest.approx(156.0)
+
+    med = median_source_age(results, now=now)
+    assert med is not None and med <= 2.0  # weighted median sits with the fresh majority
+
+    # Unknown freshness is never judged.
+    assert median_source_age([{"domain": "x.in", "age_hours": None}], now=now) is None
+    assert median_source_age([], now=now) is None
+
+
+def test_stale_coverage_never_becomes_breaking_news(monkeypatch):
+    """End to end: URL says today, the pool was published 3 days ago ->
+    INSUFFICIENT_EVIDENCE, never BREAKING_NEWS."""
+    from app.pipeline import analyze
+
+    now = datetime.now(timezone.utc)
+    stale_pub = (now - timedelta(days=3)).strftime("%d %b %Y %H:%M:%S GMT")
+    rss = (
+        "<rss><channel>"
+        "<item><title>526 kg drugs worth Rs 3,000 crore seized from Iranian boat</title>"
+        "<link>https://news.google.com/rss/articles/1</link>"
+        f"<source>India Today</source><pubDate>{stale_pub}</pubDate></item>"
+        "</channel></rss>"
+    ).encode()
+    _mock_retrieval(monkeypatch, rss)
+
+    today = now.strftime("%Y/%m/%d")
+    result = analyze(
+        f"https://city-voice.in/news/{today}/drugs-boat.html",
+        region="in",
+        html=_DRUGS_HTML,
+    )
+    v = result.ai_signals["verification"]
+    assert v["breaking"] is False
+    assert v["state"] == INSUFFICIENT
+    info = v["breaking_info"]
+    assert info["median_source_age_hours"] is not None
+    assert info["median_source_age_hours"] > get_config().breaking_max_median_age_hours
+    assert "stale" in info["reason"]

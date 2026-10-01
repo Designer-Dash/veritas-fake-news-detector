@@ -7,16 +7,17 @@ Signature marker 008/013 · designer-dash
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 from .ai_signals import scan_bytes, scan_html_for_media_flags, score_media_signals
 from .cache import get_cache
 from .claim_analysis import extract_claim, extract_published_date, generate_search_queries
 from .config import get_config
-from .cross_check import links_to_trusted, retrieve_reference_sources
+from .cross_check import links_to_trusted, median_source_age, retrieve_reference_sources
 from .domain import AnalysisResult, Evidence, SourceMatch, verdict_from_suspicion
 from .gemini_client import CallBudget
 from .security import SecurityError, fetch_media_head, safe_fetch, validate_url
@@ -94,12 +95,57 @@ def find_lead_image_url(html: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+class SourceRetriever:
+    """The single, injectable retrieval boundary for reference sources.
+
+    Everything network-facing about cross-source retrieval funnels through
+    ``SourceRetriever.fetch`` (SSRF-guarded ``safe_fetch`` by default), so:
+
+      * tests patch exactly one place
+        (``monkeypatch.setattr('app.pipeline.SourceRetriever.fetch', mock)``)
+        instead of re-patching ``safe_fetch`` in every consuming module, and
+      * a future source backend (Bing News, a fact-check API) can be swapped
+        in via ``fetch_func`` or a subclass without touching scoring logic.
+
+    ``fetch_func`` follows the ``safe_fetch`` contract: ``(url, timeout=...) -> bytes | None``.
+    """
+
+    def __init__(self, fetch_func: Optional[Callable[..., Optional[bytes]]] = None):
+        self.fetch_func = fetch_func
+
+    @staticmethod
+    def fetch(url: str, timeout: int = 8) -> Optional[bytes]:
+        """Default network boundary; tests replace this at class level."""
+        return safe_fetch(url, timeout=timeout)
+
+    def retrieve(
+        self,
+        claim_text: str,
+        queries: List[str],
+        region: str,
+        page_domain: str = "",
+        cfg: Any = None,
+    ) -> List[Dict[str, Any]]:
+        # Resolved via the class (not ``self``) so a monkeypatched plain
+        # function is called unbound -- ``fetch(url)`` -- never as a method.
+        fetch = self.fetch_func or SourceRetriever.fetch
+        return retrieve_reference_sources(
+            claim_text,
+            queries,
+            region=region,
+            page_domain=page_domain,
+            cfg=cfg,
+            fetch_func=fetch,
+        )
+
+
 def analyze(
     url: str,
     region: str = "in",
     html: Optional[str] = None,
     headline_override: Optional[str] = None,
     include_cross_check: bool = True,
+    retriever: Optional[SourceRetriever] = None,
 ) -> AnalysisResult:
     """Full analysis of a news page. `html` may be supplied by the extension
     (content script DOM snapshot) to avoid a refetch; otherwise we fetch it."""
@@ -196,9 +242,13 @@ def analyze(
     trusted_links = links_to_trusted(html, region, page_domain=dom)
     cfg = get_config()
     verification: Optional[VerificationResult] = None
+    claim: Any = None
+    queries: List[str] = []
+    median_age: Optional[float] = None
 
     if include_cross_check and headline:
         budget = CallBudget(cfg.gemini_max_calls)
+        retriever = retriever or SourceRetriever()
         try:
             # Extract the claim once (cached) and reuse it for queries,
             # retrieval and every pairwise comparison.
@@ -213,9 +263,11 @@ def analyze(
             if hit:
                 verification = cached
             else:
-                candidates = retrieve_reference_sources(
+                candidates = retriever.retrieve(
                     claim.claim, queries, region=region, page_domain=dom, cfg=cfg
                 )
+                # Source freshness: a stale pool never reads as "breaking".
+                median_age = median_source_age(candidates, cfg=cfg)
                 verification = get_final_verification_result(
                     claim,
                     candidates,
@@ -224,6 +276,7 @@ def analyze(
                     queries=queries,
                     budget=budget,
                     cfg=cfg,
+                    median_source_age_hours=median_age,
                 )
                 vcache.set(vkey, verification)
         except Exception:
@@ -375,6 +428,50 @@ def analyze(
     if rep["reasons"]:
         confidence += 0.05
     confidence = min(confidence, 0.95)
+
+    # Developer diagnostics: ONE JSON-serializable payload per analysis at
+    # DEBUG level, gated on VERITAS_DEBUG=1 -- internal/dev-only, never part
+    # of the response, so the zero-user-change rule still holds. Gives an
+    # immediate "why" while tuning thresholds (fact_unmentioned_factor,
+    # cross_weight_slope, breaking windows) against real stories.
+    if cfg.debug:
+        vdict = verification.to_dict() if verification is not None else None
+        debug_payload: Dict[str, Any] = {
+            "url": url,
+            "region": region,
+            "domain": dom,
+            "claim": claim.claim if claim is not None else None,
+            "claim_source": claim.source if claim is not None else None,
+            "queries": list(queries),
+            "sources_checked": selected,
+            "sources": [
+                {
+                    "outlet": a.outlet,
+                    "weight": round(a.weight, 3),
+                    "similarity": round(a.similarity, 1),
+                    "relationship": a.relationship,
+                }
+                for a in (verification.assessments if verification is not None else [])
+            ],
+            "evidence": {
+                "M": vdict["components"]["semantic_M"] if vdict else None,
+                "C": vdict["components"]["consensus_C"] if vdict else None,
+                "F": vdict["components"]["facts_F"] if vdict else None,
+                "S": vdict["components"]["source_quality_S"] if vdict else None,
+                "E": vdict["evidence_score"] if vdict else None,
+                "state": vdict["state"] if vdict else "disabled",
+                "penalty": vdict["contradiction_penalty_applied"] if vdict else None,
+                "breaking": vdict["breaking"] if vdict else False,
+            },
+            "median_source_age_hours": median_age,
+            "cross_weight": round(cross_weight, 3),
+            "suspicion": round(suspicion, 3),
+            "confidence": round(confidence, 3),
+            "verdict": verdict,
+        }
+        logger.debug(
+            "debug_payload: %s", json.dumps(debug_payload, ensure_ascii=False, default=str)
+        )
 
     matches = [
         SourceMatch(

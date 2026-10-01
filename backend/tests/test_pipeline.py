@@ -196,19 +196,18 @@ RSS_ITEM = """
 
 
 def _mock_safe_fetch(monkeypatch, rss_by_query):
-    """Patch safe_fetch in both consumer modules with a canned RSS responder."""
+    """Canned RSS responder at the single retrieval boundary
+    (SourceRetriever.fetch) -- one patch, no per-module safe_fetch."""
 
-    def fake_safe_fetch(url, **kwargs):
+    def fake_fetch(url, **kwargs):
         for needle, body in rss_by_query.items():
             if needle in url:
                 return body
         return b"" if "news.google.com" in url else None
 
-    import app.cross_check as cc
     import app.pipeline as pl
 
-    monkeypatch.setattr(cc, "safe_fetch", fake_safe_fetch)
-    monkeypatch.setattr(pl, "safe_fetch", fake_safe_fetch)
+    monkeypatch.setattr(pl.SourceRetriever, "fetch", fake_fetch)
 
 
 def test_pipeline_corroborates_real_story(monkeypatch):
@@ -259,14 +258,13 @@ def test_pipeline_flags_fabricated_story(monkeypatch):
 
 
 def test_pipeline_handles_network_failure_gracefully(monkeypatch):
-    import app.cross_check as cc
     import app.pipeline as pl
 
     def dead_fetch(url, **kwargs):
         return None  # security layer contract: failures come back as None
 
-    monkeypatch.setattr(cc, "safe_fetch", dead_fetch)
-    monkeypatch.setattr(pl, "safe_fetch", dead_fetch)
+    monkeypatch.setattr(pl.SourceRetriever, "fetch", dead_fetch)
+    monkeypatch.setattr(pl, "safe_fetch", dead_fetch)  # page fetch, if any
     result = analyze(
         "https://www.ndtv.com/some/story.html",
         region="in",

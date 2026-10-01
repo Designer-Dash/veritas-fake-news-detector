@@ -607,17 +607,27 @@ def detect_breaking_news(
     available_sources: int,
     cfg: Optional[VerificationConfig] = None,
     now: Optional[datetime] = None,
+    median_source_age_hours: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Detect very recent articles with thin coverage (spec:
     detectBreakingNews()). Absence of reports is NOT evidence against a
     story that just happened — the caller marks it BREAKING_NEWS /
-    EARLY_REPORT internally. Unknown dates are never treated as breaking."""
+    EARLY_REPORT internally. Unknown dates are never treated as breaking.
+
+    ``median_source_age_hours`` (source freshness, from
+    app.cross_check.median_source_age()) adds a second axis: the article
+    must be recent AND its reference pool must be recent. A stale pool
+    (median older than cfg.breaking_max_median_age_hours) is recycled
+    coverage of an older event, not a fresh story. Unknown source ages
+    pass through — they never block breaking handling either.
+    """
     cfg = cfg or get_config()
     now = now or datetime.now(timezone.utc)
     info: Dict[str, Any] = {
         "is_breaking": False,
         "published": None,
         "age_hours": None,
+        "median_source_age_hours": median_source_age_hours,
         "reason": "no publication date",
     }
     if published_date is None:
@@ -639,6 +649,18 @@ def detect_breaking_news(
     if available_sources >= cfg.breaking_min_sources:
         info["reason"] = "recent but enough independent sources exist"
         return info
+    if (
+        median_source_age_hours is not None
+        and median_source_age_hours > cfg.breaking_max_median_age_hours
+    ):
+        # Article looks recent, but the coverage pool does not: a stale
+        # outlet republishing an old event as "new" is not breaking news.
+        info["reason"] = (
+            f"reference coverage is stale (median source age "
+            f"{median_source_age_hours:.1f}h > "
+            f"{cfg.breaking_max_median_age_hours:.1f}h)"
+        )
+        return info
     info["is_breaking"] = True
     info["reason"] = (
         f"published {age_hours:.1f}h ago with only {available_sources} "
@@ -659,12 +681,17 @@ def get_final_verification_result(
     queries: Optional[List[str]] = None,
     budget: Optional[CallBudget] = None,
     cfg: Optional[VerificationConfig] = None,
+    median_source_age_hours: Optional[float] = None,
 ) -> VerificationResult:
     """Run the full deterministic scoring pipeline (spec:
     getFinalVerificationResult()).
 
     `candidates` comes from retrieve_reference_sources() (already ranked,
     relevance-filtered). At most cfg.max_sources (10) are processed.
+
+    `median_source_age_hours` is the freshness of that pool (see
+    app.cross_check.median_source_age()); it gates BREAKING_NEWS so stale
+    coverage never masquerades as a just-happened event.
     """
     cfg = cfg or get_config()
     queries = list(queries or [])
@@ -672,7 +699,12 @@ def get_final_verification_result(
     found = len(candidates)
     selected_sources = candidates[: cfg.max_sources]
 
-    breaking_info = detect_breaking_news(published_date, found, cfg)
+    breaking_info = detect_breaking_news(
+        published_date,
+        found,
+        cfg,
+        median_source_age_hours=median_source_age_hours,
+    )
     is_breaking = bool(breaking_info.get("is_breaking"))
 
     # ONE batched Gemini call for similarity + relationship (budgeted).

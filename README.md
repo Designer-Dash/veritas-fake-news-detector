@@ -38,11 +38,16 @@ S = source-quality score (configurable trust tiers: 1.00 / 0.85 / 0.65 / 0.40)
 A strong contradiction from a high-weight trusted source applies a flat
 configurable penalty (−15) so weak sources cannot bury it. Very recent
 stories with thin coverage are marked internally `BREAKING_NEWS` /
-`EARLY_REPORT`, thin pools (< 5 sources) become `INSUFFICIENT_EVIDENCE`,
-and neither is treated as evidence against the article. Gemini is used only
-for structured analysis (claim extraction, batched pairwise comparison) —
-the score itself is always computed by the backend. All thresholds and
-weights live in `backend/app/config.py` and are env-tunable (`VERITAS_*`).
+`EARLY_REPORT` — but only if the reference pool is fresh too (median
+source age ≤ `VERITAS_BREAKING_MAX_MEDIAN_AGE_HOURS`, default 2h; a stale
+pool is recycled coverage, not a just-happened event). Thin pools (< 5
+sources) become `INSUFFICIENT_EVIDENCE`, and neither is treated as evidence
+against the article. Gemini is used only for structured analysis (claim
+extraction, batched pairwise comparison) — the score itself is always
+computed by the backend. All thresholds and weights live in
+`backend/app/config.py` and are env-tunable (`VERITAS_*`); setting
+`VERITAS_DEBUG=1` emits one JSON `debug_payload` per analysis at DEBUG level
+(developer diagnostics only — never part of the API response).
 
 ## Repository layout
 
@@ -51,6 +56,7 @@ backend/
   app/
     main.py          FastAPI app: POST /analyze, GET /health
     pipeline.py      Combines all signals into one explainable verdict
+                     (SourceRetriever = injectable retrieval boundary)
     ai_signals.py    C2PA / IPTC DST / SynthID / generator-marker scanning
     text_analysis.py Stylometry + clickbait/hedging heuristics (no deps)
     claim_analysis.py  Claim extraction/normalization + search queries (Gemini or fallback)
@@ -106,11 +112,13 @@ cd backend
 python -m pytest -q
 ```
 
-105 deterministic, offline tests cover text extraction/scoring, cross-check
+111 deterministic, offline tests cover text extraction/scoring, cross-check
 similarity and self-outlet exclusion, claim extraction/normalization,
 consensus/evidence-score math, contradiction penalties, breaking-news
-detection, source weighting, retrieval caps, pipeline verdicts (with mocked
-network), and the API contract. Gemini is force-disabled in tests; its HTTP
+detection (including the source-freshness gate), source weighting,
+retrieval caps, the injectable SourceRetriever boundary, the
+VERITAS_DEBUG payload, pipeline verdicts (with mocked network), and the
+API contract. Gemini is force-disabled in tests; its HTTP
 call is covered with a mocked transport. Live behavior against real news
 pages is verified separately (see the live-test reports in the project
 history).

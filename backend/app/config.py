@@ -17,6 +17,12 @@ Key knobs (defaults shown):
         Flat deduction applied when a trusted source contradicts the claim.
     VERITAS_BREAKING_WINDOW_HOURS / VERITAS_BREAKING_MIN_SOURCES
         Recency window for BREAKING_NEWS / EARLY_REPORT internal state.
+    VERITAS_BREAKING_MAX_MEDIAN_AGE_HOURS
+        Freshness gate: the reference pool's median source age must be at
+        most this (stale coverage of an old event is never "breaking").
+    VERITAS_DEBUG
+        1/true -> emit one structured JSON debug_payload per analysis at
+        DEBUG level (developer diagnostics; never exposed to users).
 
 Signature marker: verification rework (claim-based evidence scoring).
 """
@@ -49,6 +55,13 @@ def _i(name: str, default: int) -> int:
 
 def _s(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
+
+
+def _b(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
 
 
 @dataclass(frozen=True)
@@ -97,6 +110,13 @@ class VerificationConfig:
     # -- Breaking news --------------------------------------------------------
     breaking_window_hours: float = 48.0
     breaking_min_sources: int = 3
+    # Source-freshness gate: article recency alone is not enough -- a stale
+    # reference pool (median age above this) means recycled coverage of an
+    # older event, not a fresh story. Unknown source dates never block.
+    breaking_max_median_age_hours: float = 2.0
+
+    # -- Developer diagnostics (internal only; never part of the UI) ----------
+    debug: bool = False   # VERITAS_DEBUG=1 -> one JSON debug_payload per run
 
     # -- Gemini (structured analysis only; never the final decision) ----------
     gemini_model: str = "gemini-2.0-flash"
@@ -144,6 +164,8 @@ def get_config() -> VerificationConfig:
         cross_weight_slope=_f("VERITAS_CROSS_SLOPE", 1.0),
         breaking_window_hours=_f("VERITAS_BREAKING_WINDOW_HOURS", 48.0),
         breaking_min_sources=max(1, _i("VERITAS_BREAKING_MIN_SOURCES", 3)),
+        breaking_max_median_age_hours=_f("VERITAS_BREAKING_MAX_MEDIAN_AGE_HOURS", 2.0),
+        debug=_b("VERITAS_DEBUG"),
         gemini_model=_s("VERITAS_GEMINI_MODEL", "gemini-2.0-flash"),
         gemini_max_calls=max(1, _i("VERITAS_GEMINI_MAX_CALLS", 2)),
         gemini_timeout=_f("VERITAS_GEMINI_TIMEOUT", 8.0),

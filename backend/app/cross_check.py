@@ -25,12 +25,14 @@ import difflib
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, Dict, List, Optional
 
 from .cache import get_cache
 from .config import get_config
 from .security import safe_fetch
-from .sources import outlets_for_region
+from .sources import outlets_for_region, source_weight
 
 USER_AGENT = (
     "Veritas-FND/0.1 (educational fake-news research; contact: dev@example.org)"
@@ -182,13 +184,85 @@ def _parse_rss_items(rss: Optional[bytes], limit: int) -> List[Dict[str, str]]:
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
             source = (item.findtext("source") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
             if title and link:
-                items.append({"title": title, "link": link, "outlet": source})
+                items.append(
+                    {"title": title, "link": link, "outlet": source, "pub_date": pub}
+                )
             if len(items) >= limit:
                 break
     except ET.ParseError:
         pass
     return items
+
+
+_ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+_DATE_SEGMENT_RE = re.compile(r"/(20\d{2})/(\d{2})/(\d{2})(?:/|$|\.)")
+
+
+def _parse_source_date(item: Dict[str, Any]) -> Optional[datetime]:
+    """Publication time of a reference source: the RSS ``pubDate`` (exact)
+    first, then a full date embedded in the article URL. None = unknown
+    freshness -- unknown ages are never used to judge (or block) recency.
+
+    Lives here (not app.claim_analysis) because claim_analysis imports from
+    this module -- a top-level import would create a cycle.
+    """
+    raw = (item.get("pub_date") or "").strip()
+    if raw:
+        try:
+            dt = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            dt = None
+        if dt is not None:
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    url = item.get("link", "") or ""
+    m = _ISO_DATE_RE.search(url)
+    if m:
+        y, mo, d = (int(part) for part in m.group(1).split("-"))
+        try:
+            return datetime(y, mo, d, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    m = _DATE_SEGMENT_RE.search(url)
+    if m:
+        try:
+            return datetime(
+                int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def median_source_age(
+    candidates: Optional[List[Dict[str, Any]]],
+    cfg=None,
+    now: Optional[datetime] = None,
+) -> Optional[float]:
+    """Tier-weighted median age (hours) of the reference sources that state
+    a publication time; None when none do (unknown freshness never blocks
+    breaking-news handling downstream). A pool whose median is older than
+    cfg.breaking_max_median_age_hours is recycled coverage, not a fresh event.
+    """
+    now = now or datetime.now(timezone.utc)
+    cfg = cfg or get_config()
+    aged: List[tuple] = []
+    for c in candidates or []:
+        age = c.get("age_hours")
+        if age is None:
+            continue
+        aged.append((max(float(age), 0.0), source_weight(str(c.get("domain", "")), cfg)))
+    if not aged:
+        return None
+    aged.sort(key=lambda t: t[0])
+    total = sum(w for _, w in aged) or 1.0
+    acc = 0.0
+    for age, weight in aged:
+        acc += weight
+        if acc >= total / 2.0:
+            return round(age, 1)
+    return round(aged[-1][0], 1)
 
 
 def _slug(text: str) -> str:
@@ -231,6 +305,8 @@ def retrieve_reference_sources(
     region: str,
     page_domain: str = "",
     cfg=None,
+    fetch_func: Optional[Callable[..., Optional[bytes]]] = None,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Search the reference-source pool for a claim (spec:
     retrieveReferenceSources()).
@@ -241,10 +317,20 @@ def retrieve_reference_sources(
     claim, and returns the strongest relevant candidates (uncapped here;
     the verification layer keeps at most cfg.max_sources = 10).
 
+    ``fetch_func`` is the single network boundary (defaults to the SSRF-
+    guarded fetcher); pipeline injects ``SourceRetriever.fetch`` here so
+    tests patch one place and alternative backends can be swapped in.
+
+    Each candidate also carries ``published`` / ``age_hours`` (RSS pubDate,
+    else a date in the article URL; None = unknown) so callers can judge
+    source freshness via median_source_age().
+
     Repeated searches are answered from a TTL cache, so re-checking the
     same claim costs zero extra requests.
     """
     cfg = cfg or get_config()
+    fetch = fetch_func or _fetch
+    now = now or datetime.now(timezone.utc)
     own_base = _registrable(page_domain) if page_domain else ""
     own_slug = _slug(page_domain)
     rss_cache = get_cache("rss", maxsize=512, ttl=cfg.rss_cache_ttl)
@@ -258,7 +344,7 @@ def retrieve_reference_sources(
         hit, items = rss_cache.get(cache_key)
         if not hit:
             items = _parse_rss_items(
-                _fetch(_google_news_url(query, region)), cfg.max_query_sources
+                fetch(_google_news_url(query, region)), cfg.max_query_sources
             )
             # Never negative-cache: an empty result may be a transient
             # network failure, and caching it would suppress recovery on
@@ -286,12 +372,20 @@ def retrieve_reference_sources(
             key = (outlet or "").strip().lower() or (it.get("link") or it["title"]).lower()
             prev = candidates.get(key)
             if prev is None or prev["similarity"] < sim:
+                published = _parse_source_date(it)
+                age_hours = (
+                    round(max((now - published).total_seconds() / 3600.0, 0.0), 1)
+                    if published
+                    else None
+                )
                 candidates[key] = {
                     "outlet": outlet,
                     "domain": domain,
                     "url": it.get("link", ""),
                     "title": it["title"][:200],
                     "similarity": round(sim, 3),
+                    "published": published.isoformat() if published else None,
+                    "age_hours": age_hours,
                 }
 
         # Early stop: enough relevant results to pick the strongest 5-10.
