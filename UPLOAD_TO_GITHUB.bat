@@ -8,7 +8,7 @@ echo   🛡️  Veritas — GitHub Upload Helper
 echo ============================================================
 echo.
 echo Pushing local repository to GitHub...
-echo Target: https://github.com/manuraj132/veritas-fake-news-detector.git
+echo Target: https://github.com/Designer-Dash/veritas-fake-news-detector.git
 echo.
 
 git branch -M main
@@ -18,7 +18,7 @@ if %errorlevel% equ 0 (
     echo.
     echo ============================================================
     echo   ✅ SUCCESS! Your project is now live on GitHub:
-    echo   https://github.com/manuraj132/veritas-fake-news-detector
+    echo   https://github.com/Designer-Dash/veritas-fake-news-detector
     echo ============================================================
 ) else (
     echo.
