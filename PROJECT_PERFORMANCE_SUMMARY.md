@@ -1,4 +1,4 @@
-# GROUP 3
+# GROUP 5
 ## Project Performance Summary & Baseline Comparison
 ### Veritas: AI-Based Fake & AI-Generated News Detection using Explainable Multi-Source Cross-Corroboration and Multimodal Provenance
 
