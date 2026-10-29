@@ -8,13 +8,19 @@ echo   🛡️  Veritas — Starting Backend API Server
 echo ============================================================
 echo.
 
-REM Activate virtual environment if present
+REM Activate virtual environment if present, or create one if not
 if exist "backend\.venv\Scripts\activate.bat" (
     echo [*] Activating backend\.venv virtual environment...
     call backend\.venv\Scripts\activate.bat
 ) else if exist ".venv\Scripts\activate.bat" (
     echo [*] Activating .venv virtual environment...
     call .venv\Scripts\activate.bat
+) else (
+    echo [*] No virtual environment detected. Running first-time setup...
+    call "SETUP.bat"
+    if exist "backend\.venv\Scripts\activate.bat" (
+        call backend\.venv\Scripts\activate.bat
+    )
 )
 
 echo [*] Launching FastAPI backend on http://127.0.0.1:8000 ...

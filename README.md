@@ -7,6 +7,33 @@ Install the extension once, browse normally; when a page looks like news it is
 analyzed automatically and a banner appears with a verdict, the evidence behind
 it, and links to trusted coverage of the same story.
 
+---
+
+## ⚡ 1-Click Quick Start (Collaborators & Friends)
+
+Getting started is 1-click simple on Windows:
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/Designer-Dash/veritas-fake-news-detector.git
+cd veritas-fake-news-detector
+
+# 2. Run 1-Click Setup (creates Python venv & installs dependencies)
+SETUP.bat
+```
+
+| Launcher | Description |
+|---|---|
+| **`00_QUICK_START.bat`** | Interactive menu to launch backend, extension, or tests from one screen. |
+| **`SETUP.bat`** | Creates isolated virtual environment and installs all dependencies. |
+| **`01_START_SERVER.bat`** | Runs backend server on `http://localhost:8000` with dev mode. |
+| **`02_LOAD_EXTENSION.bat`** | 1-click helper: copies extension path & opens Chrome extensions manager. |
+| **`03_TEST_SYSTEM.bat`** | Runs full offline test suite (`pytest`) — 255+ tests, 100% passing. |
+
+> 📖 **Want to edit and contribute?** Read **[CONTRIBUTING.md](CONTRIBUTING.md)** for developer instructions, branching, and pushing code back to GitHub!
+
+---
+
 ## How it detects (v0.1 signals)
 
 | Signal | What it checks | Inspired by |

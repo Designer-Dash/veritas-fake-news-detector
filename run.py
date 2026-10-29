@@ -46,11 +46,19 @@ def main():
 
     try:
         import uvicorn
+        import fastapi
     except ImportError:
-        print("\n❌ Error: 'uvicorn' module is not installed.")
-        print("Please install requirements using:")
-        print("    pip install -r backend/requirements.txt")
-        sys.exit(1)
+        print("\n⚠️  Required dependencies not found in current Python environment.")
+        print("    Attempting automatic installation of backend/requirements.txt...")
+        req_file = BACKEND_DIR / "requirements.txt"
+        import subprocess
+        res = subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req_file)])
+        if res.returncode != 0:
+            print("\n❌ Error: Failed to install requirements automatically.")
+            print("Please run: pip install -r backend/requirements.txt")
+            sys.exit(1)
+        import uvicorn
+        import fastapi
 
     try:
         uvicorn.run(
