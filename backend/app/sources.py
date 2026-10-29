@@ -27,6 +27,43 @@ TRUSTED_SOURCES: Dict[str, Dict[str, List[str]]] = {
             "reuters.com",
             "apnews.com",
             "bbc.com",
+            # Major Indian English outlets (previously missing from trusted list)
+            "newindianexpress.com",
+            "economictimes.indiatimes.com",
+            "theprint.in",
+            "firstpost.com",
+            "deccanherald.com",
+            "business-standard.com",
+            "moneycontrol.com",
+            "theweek.in",
+            "scroll.in",
+            "ptinews.com",
+            "aninews.in",
+            "thewire.in",
+            "thequint.com",
+            "outlookindia.com",
+            "telegraphindia.com",
+            "thestatesman.com",
+            "wionews.com",
+            # Major regional outlets (user fix 5): their coverage of local
+            # stories counts as corroboration at the tier-3 weight.
+            "dainikbhaskar.com",
+            "bhaskar.com",
+            "amarujala.com",
+            "jagran.com",
+            "patrika.com",
+            "livehindustan.com",
+            "navbharattimes.indiatimes.com",
+            "eenadu.net",
+            "dailythanthi.com",
+            "mathrubhumi.com",
+            "manoramaonline.com",
+            "loksatta.com",
+            "maharashtratimes.com",
+            "anandabazar.com",
+            "prajavani.net",
+            "gujaratsamachar.com",
+            "tribuneindia.com",
         ],
     },
     "us": {
@@ -68,6 +105,40 @@ TRUSTED_SOURCES: Dict[str, Dict[str, List[str]]] = {
 }
 
 DEFAULT_REGION = "in"
+
+# A deliberately small, auditable ownership registry.  These groups are used
+# only to avoid counting sister publications as independent corroboration; they
+# do not alter a source's trust tier.  Unknown outlets stay independent rather
+# than being guessed into a group.
+PUBLISHER_GROUPS: Dict[str, frozenset[str]] = {
+    "times_group": frozenset(
+        {
+            "timesofindia.indiatimes.com",
+            "economictimes.indiatimes.com",
+            "navbharattimes.indiatimes.com",
+            "maharashtratimes.com",
+            "ei-samay.com",
+        }
+    ),
+    "india_today_group": frozenset({"indiatoday.in", "aajtak.in", "businesstoday.in"}),
+    "network18": frozenset({"news18.com", "moneycontrol.com", "firstpost.com"}),
+    "ht_media": frozenset({"hindustantimes.com", "livemint.com", "livehindustan.com"}),
+    "bhaskar_group": frozenset({"dainikbhaskar.com", "bhaskar.com", "divyabhaskar.com"}),
+}
+
+
+def publisher_group(domain: str) -> str:
+    """Return a known editorial ownership group or the source domain itself.
+
+    Returning the normalized domain for unknown outlets is intentionally
+    conservative: without documented ownership evidence we do not assert that
+    two sources are related.
+    """
+    d = (domain or "").lower().strip()
+    for group, domains in PUBLISHER_GROUPS.items():
+        if any(d == item or d.endswith("." + item) for item in domains):
+            return group
+    return d
 
 # ---------------------------------------------------------------------------
 # Source weighting tiers (configurable via app.config VerificationConfig)
@@ -113,6 +184,17 @@ TIER2_DOMAINS = frozenset(
         "telegraph.co.uk",
         "aljazeera.com",
         "standard.co.uk",
+        # Major Indian English outlets added: previously missed, fell to weight 0.40.
+        "newindianexpress.com",     # The New Indian Express (distinct from indianexpress.com)
+        "economictimes.indiatimes.com",  # The Economic Times
+        "theprint.in",             # The Print (established digital)
+        "firstpost.com",           # Firstpost
+        "deccanherald.com",        # Deccan Herald
+        "business-standard.com",   # Business Standard
+        "moneycontrol.com",        # Moneycontrol
+        "theweek.in",              # The Week
+        "scroll.in",               # Scroll.in
+        "ptinews.com",             # PTI (wire service)
     }
 )
 
@@ -121,6 +203,64 @@ TIER3_DOMAINS = frozenset(
         "dailymail.co.uk",
         "newyorkpost.com",
         "ibtimes.co.uk",
+        # Independent/digital Indian outlets
+        "thewire.in",
+        "thequint.com",
+        "outlookindia.com",
+        "newslaundry.com",
+        "telegraphindia.com",
+        "thestatesman.com",
+        "wionews.com",
+        # Regional Indian outlets (user fix 5): legitimate journalism with
+        # large regional reach but limited international footprint. They are
+        # real reference sources at the lower-confidence weight (0.65 via
+        # VERITAS_TIER3_WEIGHT), never "unknown" (0.40).
+        # Hindi language (national reach)
+        "dainikbhaskar.com",
+        "amarujala.com",
+        "jagran.com",
+        "patrika.com",
+        "livehindustan.com",
+        "navbharattimes.indiatimes.com",
+        "bhaskar.com",
+        "punjabkesari.in",
+        "rajasthanpatrika.com",
+        "jansatta.com",
+        # Telugu
+        "eenadu.net",
+        "sakshi.com",
+        "andhrajyothy.com",
+        "tenmag.com",
+        # Tamil
+        "dinamalar.com",
+        "dinamani.com",
+        "dailythanthi.com",
+        "vikatan.com",
+        # Malayalam
+        "mathrubhumi.com",
+        "manoramaonline.com",
+        "deepika.com",
+        # Marathi
+        "loksatta.com",
+        "maharashtratimes.com",
+        "divyamarathi.bhaskar.com",  # also matched via parent bhaskar.com
+        # Bengali
+        "anandabazar.com",
+        "bartamanpatrika.com",
+        "ei-samay.com",
+        # Kannada
+        "prajavani.net",
+        "udayavani.com",
+        "kannadaprabha.com",
+        # Gujarati
+        "gujaratsamachar.com",
+        "divyabhaskar.com",
+        # Odia
+        "sambad.net",
+        "dharitri.com",
+        # Punjabi / North India English
+        "tribuneindia.com",
+        # (hindustantimes.com deliberately NOT duplicated here: it is TIER2)
     }
 )
 

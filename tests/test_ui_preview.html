@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Veritas Extension Editorial Redesign Preview & Test Matrix</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      background: #E2E8F0;
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      padding: 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 30px;
+    }
+    h1 {
+      font-size: 24px;
+      color: #1E293B;
+      margin-bottom: 8px;
+    }
+    p.lead {
+      color: #64748B;
+      font-size: 14px;
+      max-width: 700px;
+      text-align: center;
+      margin: 0 0 20px 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 30px;
+      max-width: 1200px;
+      width: 100%;
+    }
+    .preview-box {
+      background: #FFFFFF;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .preview-title {
+      font-weight: 700;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748B;
+      margin-bottom: 12px;
+      align-self: flex-start;
+    }
+    iframe {
+      width: 340px;
+      height: 480px;
+      border: 1px solid #CBD5E1;
+      border-radius: 8px;
+      background: #FAF8F5;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+    }
+  </style>
+</head>
+<body>
+  <h1>Veritas Editorial UI Verification Matrix</h1>
+  <p class="lead">
+    High-fidelity validation of the compact editorial news style (340px, paper-white surface, navy masthead, restrained red divider, Georgia serif headline, and amber callout for neutral state).
+  </p>
+
+  <div class="grid">
+    <!-- 1. Neutral / Unverified for now -->
+    <div class="preview-box">
+      <div class="preview-title">1. Neutral ("Unverified for now")</div>
+      <iframe id="frameUnverified" src="about:blank"></iframe>
+    </div>
+
+    <!-- 2. Corroborated / Supported by coverage -->
+    <div class="preview-box">
+      <div class="preview-title">2. Corroborated ("Supported by coverage")</div>
+      <iframe id="frameSupported" src="about:blank"></iframe>
+    </div>
+
+    <!-- 3. Suspicious reporting -->
+    <div class="preview-box">
+      <div class="preview-title">3. Misleading ("Suspicious reporting")</div>
+      <iframe id="frameSuspicious" src="about:blank"></iframe>
+    </div>
+
+    <!-- 4. Contradicted claim -->
+    <div class="preview-box">
+      <div class="preview-title">4. Fake / Contradicted ("Contradicted claim")</div>
+      <iframe id="frameFake" src="about:blank"></iframe>
+    </div>
+
+    <!-- 5. Loading State -->
+    <div class="preview-box">
+      <div class="preview-title">5. Loading State (Shimmers)</div>
+      <iframe id="frameLoading" src="about:blank"></iframe>
+    </div>
+
+    <!-- 6. Error State -->
+    <div class="preview-box">
+      <div class="preview-title">6. Error State (Backend Unreachable)</div>
+      <iframe id="frameError" src="about:blank"></iframe>
+    </div>
+  </div>
+
+  <script>
+    const POPUP_HTML = `
+      <div class="card">
+        <div class="masthead">
+          <div class="masthead-titles">
+            <h1 class="masthead-name">VERITAS</h1>
+            <span class="masthead-desk">NEWS VERIFICATION DESK</span>
+          </div>
+          <button class="masthead-close" title="Close">✕</button>
+        </div>
+        <div class="red-divider"></div>
+        <div id="contentLoading" style="display: none;">
+          <div class="shimmer" style="width: 90%; height: 16px;"></div>
+          <div class="shimmer" style="width: 70%; height: 16px;"></div>
+          <div class="shimmer" style="width: 80%; margin-top: 12px;"></div>
+          <div class="shimmer" style="width: 60%;"></div>
+        </div>
+        <div id="contentReady">
+          <h2 id="headline" class="headline">INDIA Bloc leaders gather in Delhi over EC row</h2>
+          <p id="subExplanation" class="sub-explanation">Independent coverage is still limited.</p>
+          <div id="stateBox" class="state-box">
+            <div id="stateTitle" class="state-title">Unverified for now</div>
+            <div id="stateSubtitle" class="state-subtitle">Not a false-news verdict.</div>
+          </div>
+          <hr class="hairline" />
+          <div class="stats-row">
+            <span id="publishersSearched">5 publishers searched</span>
+            <span id="matchesFound">0 matches</span>
+          </div>
+          <div class="evidence-row">
+            <span>Evidence signal</span>
+            <span id="evidenceStars" class="stars">★★★★★</span>
+          </div>
+          <p id="publishersList" class="publishers-list">
+            India Today · The Hindu · Hindustan Times · NDTV · Times of India
+          </p>
+          <button id="toggleSourcesBtn" class="action-btn">View checked sources</button>
+          <div id="sourcesDrawer" class="sources-drawer"></div>
+        </div>
+        <div class="footer-bar">
+          <a class="footer-link">↺ Re-check page</a>
+          <a class="footer-link">Settings</a>
+        </div>
+      </div>
+    `;
+
+    // Fetch the styles from popup.html directly
+    fetch("../extension/popup.html")
+      .then(r => r.text())
+      .then(html => {
+        const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/);
+        const css = styleMatch ? styleMatch[1] : "";
+
+        function createPage(config) {
+          const doc = document.createElement("html");
+          doc.innerHTML = `
+            <head>
+              <meta charset="utf-8">
+              <style>${css}</style>
+            </head>
+            <body>${POPUP_HTML}</body>
+          `;
+          config(doc);
+          return "<!doctype html>" + doc.outerHTML;
+        }
+
+        // 1. Unverified
+        document.getElementById("frameUnverified").srcdoc = createPage((doc) => {
+          doc.getElementById("headline").textContent = "INDIA Bloc leaders gather in Delhi over EC row";
+          doc.getElementById("subExplanation").textContent = "Independent coverage is still limited.";
+          doc.getElementById("stateBox").style.borderLeftColor = "#C5832B";
+          doc.getElementById("stateTitle").textContent = "Unverified for now";
+          doc.getElementById("stateTitle").style.color = "#92580E";
+          doc.getElementById("stateSubtitle").textContent = "Not a false-news verdict.";
+          doc.getElementById("publishersSearched").textContent = "5 publishers searched";
+          doc.getElementById("matchesFound").textContent = "0 matches";
+          doc.getElementById("evidenceStars").textContent = "★★★★★";
+        });
+
+        // 2. Supported
+        document.getElementById("frameSupported").srcdoc = createPage((doc) => {
+          doc.getElementById("headline").textContent = "ISRO successfully launches new Earth observation satellite";
+          doc.getElementById("subExplanation").textContent = "Multiple verified news outlets corroborate this story.";
+          doc.getElementById("stateBox").style.borderLeftColor = "#15803D";
+          doc.getElementById("stateTitle").textContent = "Supported by coverage";
+          doc.getElementById("stateTitle").style.color = "#166534";
+          doc.getElementById("stateSubtitle").textContent = "Corroborated by independent news outlets.";
+          doc.getElementById("publishersSearched").textContent = "8 publishers searched";
+          doc.getElementById("matchesFound").textContent = "7 matches";
+          doc.getElementById("evidenceStars").textContent = "★★★★★";
+        });
+
+        // 3. Suspicious
+        document.getElementById("frameSuspicious").srcdoc = createPage((doc) => {
+          doc.getElementById("headline").textContent = "Sensational viral leak claims immediate policy reversal";
+          doc.getElementById("subExplanation").textContent = "Coverage contains uncorroborated elements or misleading framing.";
+          doc.getElementById("stateBox").style.borderLeftColor = "#EA580C";
+          doc.getElementById("stateTitle").textContent = "Suspicious reporting";
+          doc.getElementById("stateTitle").style.color = "#C2410C";
+          doc.getElementById("stateSubtitle").textContent = "Conflicts with reporting from verified outlets.";
+          doc.getElementById("publishersSearched").textContent = "6 publishers searched";
+          doc.getElementById("matchesFound").textContent = "1 match";
+          doc.getElementById("evidenceStars").textContent = "★★☆☆☆";
+        });
+
+        // 4. Fake / Contradicted
+        document.getElementById("frameFake").srcdoc = createPage((doc) => {
+          doc.getElementById("headline").textContent = "Viral quote attributed to chief minister fabricated on social media";
+          doc.getElementById("subExplanation").textContent = "This claim conflicts with reporting from verified news outlets.";
+          doc.getElementById("stateBox").style.borderLeftColor = "#991B1B";
+          doc.getElementById("stateTitle").textContent = "Contradicted claim";
+          doc.getElementById("stateTitle").style.color = "#7F1D1D";
+          doc.getElementById("stateSubtitle").textContent = "Directly contradicted by fact-checks or primary sources.";
+          doc.getElementById("publishersSearched").textContent = "10 publishers searched";
+          doc.getElementById("matchesFound").textContent = "0 matches";
+          doc.getElementById("evidenceStars").textContent = "★☆☆☆☆";
+        });
+
+        // 5. Loading
+        document.getElementById("frameLoading").srcdoc = createPage((doc) => {
+          doc.getElementById("contentLoading").style.display = "block";
+          doc.getElementById("contentReady").style.display = "none";
+        });
+
+        // 6. Error
+        document.getElementById("frameError").srcdoc = createPage((doc) => {
+          doc.getElementById("headline").textContent = "Active News Article";
+          doc.getElementById("subExplanation").textContent = "Verification service could not complete the request.";
+          doc.getElementById("stateBox").style.borderLeftColor = "#DC2626";
+          doc.getElementById("stateTitle").textContent = "Backend unreachable";
+          doc.getElementById("stateTitle").style.color = "#991B1B";
+          doc.getElementById("stateSubtitle").textContent = "Ensure local backend is running (01_START_SERVER.bat), then re-check.";
+          doc.getElementById("publishersSearched").textContent = "0 publishers searched";
+          doc.getElementById("matchesFound").textContent = "0 matches";
+          doc.getElementById("evidenceStars").textContent = "☆☆☆☆☆";
+          doc.getElementById("publishersList").textContent = "Local backend at http://localhost:8000";
+          doc.getElementById("toggleSourcesBtn").style.display = "none";
+        });
+      });
+  </script>
+</body>
+</html>

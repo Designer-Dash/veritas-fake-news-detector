@@ -5,86 +5,232 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <style>
       :root {
-        color-scheme: dark;
+        color-scheme: light;
       }
-      body {
-        font-family: "Inter", system-ui, sans-serif;
-        background: #0f172a;
-        color: #e2e8f0;
-        width: 320px;
-        margin: 0;
-        padding: 14px;
+      * {
         box-sizing: border-box;
       }
-      .header {
-        display: flex;
-        align-items: baseline;
-        gap: 8px;
-        margin-bottom: 12px;
-      }
-      .header h1 {
-        font-size: 16px;
+      body {
         margin: 0;
-        color: #ffffff;
-        font-weight: 700;
-      }
-      .header .sub {
-        font-size: 12px;
-        color: #64748b;
-      }
-      #badge {
-        border-radius: 10px;
-        padding: 10px 12px;
-        font-weight: 700;
+        padding: 0;
+        width: 340px;
+        background: #FAF8F5;
+        color: #0F172A;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         font-size: 13px;
-        color: #ffffff;
-        background: #1e293b;
-      }
-      #meter {
-        height: 5px;
-        border-radius: 999px;
-        background: #1e293b;
-        margin-top: 8px;
-        overflow: hidden;
-      }
-      #meterFill {
-        height: 5px;
-        border-radius: 999px;
-        width: 0%;
-        background: #334155;
-        transition: width 250ms ease-out;
-      }
-      #summary {
-        font-size: 12px;
-        color: #94a3b8;
-        margin-top: 8px;
         line-height: 1.45;
-        min-height: 16px;
+        overflow-x: hidden;
+      }
+      .card {
+        padding: 16px 18px 16px;
+      }
+      .masthead {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+      }
+      .masthead-titles {
+        display: flex;
+        flex-direction: column;
+      }
+      .masthead-name {
+        font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+        font-size: 19px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        color: #1E3A5F;
+        line-height: 1.1;
+        margin: 0;
+      }
+      .masthead-desk {
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        color: #64748B;
+        text-transform: uppercase;
+        margin-top: 3px;
+      }
+      .masthead-close {
+        color: #94A3B8;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 2px 4px;
+        background: none;
+        border: none;
+      }
+      .masthead-close:hover {
+        color: #475569;
+      }
+      .red-divider {
+        height: 3px;
+        background: #8B1E2B;
+        margin: 10px 0 14px 0;
+        border-radius: 1px;
+      }
+      .headline {
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 16.5px;
+        font-weight: 700;
+        line-height: 1.35;
+        color: #0F172A;
+        margin: 0 0 6px 0;
         overflow-wrap: anywhere;
       }
-      #chips {
-        margin-top: 8px;
-        display: none;
-        flex-wrap: wrap;
-        gap: 4px;
+      .sub-explanation {
+        font-size: 13px;
+        color: #475569;
+        line-height: 1.45;
+        margin: 0 0 12px 0;
       }
-      .chip {
-        background: #1e293b;
-        color: #7dd3fc;
-        border-radius: 999px;
-        padding: 2px 10px;
+      .state-box {
+        border-left: 4px solid #C5832B;
+        padding: 2px 0 2px 12px;
+        margin: 12px 0 14px 0;
+      }
+      .state-title {
+        font-family: Georgia, serif;
+        font-size: 15.5px;
+        font-weight: 700;
+        color: #92580E;
+        margin: 0;
+      }
+      .state-subtitle {
+        font-size: 12.5px;
+        color: #4B5563;
+        margin-top: 3px;
+      }
+      .hairline {
+        height: 1px;
+        background: #E8E4DC;
+        margin: 14px 0 12px 0;
+        border: none;
+      }
+      .stats-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12.5px;
+        color: #475569;
+        margin-bottom: 6px;
+      }
+      .evidence-row {
+        font-size: 13px;
+        font-weight: 600;
+        color: #854D0E;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 4px;
+      }
+      .stars {
+        color: #B45309;
+        font-size: 14px;
+        letter-spacing: 1px;
+      }
+      .publishers-list {
+        font-size: 11.5px;
+        color: #64748B;
+        line-height: 1.4;
+        margin: 0 0 14px 0;
+      }
+      .action-btn {
+        width: 100%;
+        padding: 9px 14px;
+        background: #FFFFFF;
+        border: 1.5px solid #CBD5E1;
+        border-radius: 8px;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 13.5px;
+        font-weight: 700;
+        color: #1E3A5F;
+        cursor: pointer;
+        transition: all 120ms ease;
+      }
+      .action-btn:hover {
+        background: #F8FAFC;
+        border-color: #94A3B8;
+      }
+      .sources-drawer {
+        display: none;
+        margin-top: 10px;
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+        background: #FFFFFF;
+      }
+      .source-item {
+        padding: 7px 10px;
+        border-bottom: 1px solid #F1F5F9;
+        font-size: 12px;
+      }
+      .source-item:last-child {
+        border-bottom: none;
+      }
+      .source-top {
+        display: flex;
+        align-items: center;
+        gap: 6px;
         font-size: 11px;
       }
+      .source-badge {
+        font-size: 9px;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: 4px;
+        color: #FFFFFF;
+      }
+      .source-badge.t1 { background: #15803D; }
+      .source-badge.t2 { background: #B45309; }
+      .source-badge.t3 { background: #64748B; }
+      .source-outlet {
+        font-weight: 600;
+        color: #1E293B;
+      }
+      .source-title {
+        display: block;
+        margin-top: 2px;
+        color: #334155;
+        text-decoration: none;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .source-title:hover {
+        text-decoration: underline;
+        color: #1E3A5F;
+      }
+      .footer-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 12px;
+        padding-top: 8px;
+        border-top: 1px solid #E8E4DC;
+        font-size: 11.5px;
+        color: #64748B;
+      }
+      .footer-link {
+        color: #64748B;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      .footer-link:hover {
+        color: #1E3A5F;
+        text-decoration: underline;
+      }
+      /* Shimmer loading */
       .shimmer {
-        height: 11px;
-        border-radius: 6px;
-        width: 85%;
-        background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+        height: 12px;
+        border-radius: 4px;
+        background: linear-gradient(90deg, #F1EFEA 25%, #E6E2DA 50%, #F1EFEA 75%);
         background-size: 400px 100%;
         animation: veritas-shimmer 1.5s ease-in-out infinite;
         margin: 6px 0;
@@ -93,45 +239,62 @@
         0% { background-position: -200px 0; }
         100% { background-position: calc(200px + 100%) 0; }
       }
-      button {
-        font-family: inherit;
-        width: 100%;
-        padding: 9px;
-        border: 0;
-        border-radius: 10px;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-        margin-top: 10px;
-      }
-      #recheck {
-        background: #6366f1;
-        color: #ffffff;
-      }
-      #recheck:hover {
-        background: #4f46e5;
-      }
-      #settings {
-        background: transparent;
-        border: 1px solid #334155;
-        color: #94a3b8;
-      }
-      #settings:hover {
-        color: #e2e8f0;
-      }
     </style>
   </head>
   <body>
-    <div class="header">
-      <h1>🛡️ Veritas</h1>
-      <span class="sub">Fake news detector</span>
+    <div class="card">
+      <div class="masthead">
+        <div class="masthead-titles">
+          <h1 class="masthead-name">VERITAS</h1>
+          <span class="masthead-desk">NEWS VERIFICATION DESK</span>
+        </div>
+        <button id="closeBtn" class="masthead-close" title="Close">✕</button>
+      </div>
+
+      <div class="red-divider"></div>
+
+      <div id="contentLoading" style="display: none;">
+        <div class="shimmer" style="width: 90%; height: 16px;"></div>
+        <div class="shimmer" style="width: 70%; height: 16px;"></div>
+        <div class="shimmer" style="width: 80%; margin-top: 12px;"></div>
+        <div class="shimmer" style="width: 60%;"></div>
+      </div>
+
+      <div id="contentReady">
+        <h2 id="headline" class="headline">Loading article...</h2>
+        <p id="subExplanation" class="sub-explanation">Analyzing independent coverage...</p>
+
+        <div id="stateBox" class="state-box">
+          <div id="stateTitle" class="state-title">Checking sources</div>
+          <div id="stateSubtitle" class="state-subtitle">Scanning verified outlets.</div>
+        </div>
+
+        <hr class="hairline" />
+
+        <div class="stats-row">
+          <span id="publishersSearched">5 publishers searched</span>
+          <span id="matchesFound">0 matches</span>
+        </div>
+
+        <div class="evidence-row">
+          <span>Evidence signal</span>
+          <span id="evidenceStars" class="stars">★★★★★</span>
+        </div>
+
+        <p id="publishersList" class="publishers-list">
+          India Today · The Hindu · Hindustan Times · NDTV · Times of India
+        </p>
+
+        <button id="toggleSourcesBtn" class="action-btn">View checked sources</button>
+        <div id="sourcesDrawer" class="sources-drawer"></div>
+      </div>
+
+      <div class="footer-bar">
+        <a id="recheckBtn" class="footer-link">↺ Re-check page</a>
+        <a id="settingsBtn" class="footer-link">Settings</a>
+      </div>
     </div>
-    <div id="badge">Checking this page…</div>
-    <div id="meter"><div id="meterFill"></div></div>
-    <div id="summary"></div>
-    <div id="chips"></div>
-    <button id="recheck">↺ Re-check</button>
-    <button id="settings">Settings</button>
+
     <script src="popup.js"></script>
   </body>
 </html>

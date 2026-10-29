@@ -253,5 +253,9 @@ class SlidingWindowLimiter:
 
 
 def client_key(ip: str, api_key_hash: str = "") -> str:
-    """Rate-limit identity: authenticated identity if present, else IP."""
-    return api_key_hash or (ip or "unknown")
+    """Rate-limit identity. IP is hashed — never stored in plain text."""
+    if api_key_hash:
+        return api_key_hash
+    # Hash IP for rate limiting — we can rate-limit without storing the real IP
+    import hashlib
+    return "ip:" + hashlib.sha256((ip or "unknown").encode()).hexdigest()[:16]

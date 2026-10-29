@@ -13,6 +13,7 @@ it, and links to trusted coverage of the same story.
 |---|---|---|
 | **Media provenance** | C2PA / Content Credentials manifests, IPTC *Digital Source Type* codes, generator EXIF/XMP markers (Midjourney, Stable Diffusion, Firefly…), SynthID-style byte markers | IPTC/C2PA standards; watermark-survey literature |
 | **AI-writing cues** | Sentence-length burstiness, vocabulary richness, stock LLM phrases, emoji/hashtag/clickbait density | Stylometric fake-news detection (e.g. `s41598-021-03100-6`) |
+| **Claim-text ML baseline** | Auditable multinomial Naive Bayes over word/bigram features, trained only on the text of LIAR fact-check claims; emits a structured diagnostic signal and is validation-gated before it can affect suspicion | Wang (ACL 2017) LIAR benchmark |
 | **Cross-source corroboration** | The underlying **claim** is extracted (Gemini when a key is configured, deterministic fallback otherwise), searched against the reference-outlet pool with 2–3 optimized queries (fetched in parallel), and the strongest **5–10 sources** are compared by semantic similarity — not exact headline matching — then scored as weighted SUPPORTS / CONTRADICTS / UNKNOWN consensus | Explainable multi-source verification (`s41599-025-05389-4`) |
 | **Domain reputation** | Known trusted outlets get a bonus; lookalike TLDs (`.com.co`, `.news`, `.xyz`), hyphen-heavy and blog-mashup domains get penalties | Classic fake-news feature work |
 
@@ -56,6 +57,7 @@ computed by the backend. All thresholds and weights live in
 | `VERITAS_W_SEMANTIC` / `VERITAS_W_CONSENSUS` / `VERITAS_W_FACTS` / `VERITAS_W_SOURCE` | 0.30 / 0.30 / 0.20 / 0.20 | Evidence Score weights (E = w·M + w·C + w·F + w·S) |
 | `VERITAS_TIER1_WEIGHT` / `VERITAS_TIER2_WEIGHT` / `VERITAS_TIER3_WEIGHT` / `VERITAS_UNKNOWN_WEIGHT` | 1.00 / 0.85 / 0.65 / 0.40 | Source-quality weight per trust tier |
 | `VERITAS_MIN_SOURCES` / `VERITAS_MAX_SOURCES` | 5 / 10 | Verification window; fewer than min → `INSUFFICIENT_EVIDENCE` |
+| `VERITAS_OUTLET_CHECKS` | 5 (bounded 5-10) | Separately scoped Google News `site:` checks attempted before a cross-source result; unsuccessful checks do not fabricate coverage |
 | `VERITAS_SUPPORTS_SIMILARITY` / `VERITAS_RELEVANCE_SIMILARITY` | 60 / 40 | Relationship thresholds on the 0–100 similarity blend |
 | `VERITAS_RETRIEVAL_FLOOR` | 0.15 | RSS results below this relevance are dropped |
 | `VERITAS_CONTRADICTION_PENALTY` | 15 | Flat E deduction when a strong trusted source contradicts |
@@ -67,12 +69,64 @@ computed by the backend. All thresholds and weights live in
 | `VERITAS_BREAKING_MIN_SOURCES` | 3 | Below this count a recent story may be breaking |
 | `VERITAS_BREAKING_MAX_MEDIAN_AGE_HOURS` | 2.0 | Source-freshness gate: older median pool ⇒ never breaking |
 | `VERITAS_GEMINI_ENABLED` / `VERITAS_GEMINI_MAX_CALLS` | auto / 2 | Structured analysis budget (never the verdict) |
+| `VERITAS_TEXT_MODEL_ENABLED` | on | Load the local claim-text model and return its diagnostic signal |
+| `VERITAS_TEXT_MODEL_MIN_TOKENS` / `VERITAS_TEXT_MODEL_MIN_COVERAGE` | 30 / 0.10 | Refuse short or out-of-distribution text instead of using model priors |
+| `VERITAS_TEXT_MODEL_FALSE_THRESHOLD` / `VERITAS_TEXT_MODEL_MAX_WEIGHT` | 0.80 / 0.18 | Conservative activation threshold and hard suspicion cap for a validated model |
+| `VERITAS_TEXT_MODEL_ALLOW_UNQUALIFIED` | off | Experimental override for a model that failed its validation precision gate; never enable in production |
+| `VERITAS_FACT_CHECK_API_KEY` | empty | Google Fact Check Tools API key; feature dormant when unset |
+| `VERITAS_FACT_CHECK_ENABLED` / `VERITAS_FACT_CHECK_MAX_RESULTS` / `VERITAS_FACT_CHECK_TIMEOUT` | on / 5 / 6.0 | Fact-check review retrieval |
+| `VERITAS_FACT_CHECK_WEIGHT` / `VERITAS_FACT_CHECK_REVIEWER_WEIGHT` | 0.30 / 1.0 | F′ = (1−w)·F + w·FC blend; per-review weight |
+| `VERITAS_FACT_CHECK_CACHE_TTL` | 300 | Per-claim review cache (same default as verification cache) |
+| `VERITAS_CONFIDENCE_BASE` / `VERITAS_CONF_TEXT_BONUS` / `VERITAS_CONF_VERIFICATION_BONUS` / `VERITAS_CONF_DOMAIN_BONUS` / `VERITAS_CONFIDENCE_CAP` | 0.55 / 0.15 / 0.15 / 0.05 / 0.90 | Confidence increments; cap equals the reachable maximum |
+| `VERITAS_TLD_WHITELIST` | empty | Comma-separated registrable domains exempt from the lookalike-TLD penalty |
 | `VERITAS_DEBUG` | off | One JSON `debug_payload` per analysis at DEBUG level |
 | `VERITAS_RATE_MAX` / `VERITAS_RATE_WINDOW_SEC` / `VERITAS_MAX_CONCURRENT` | see `config`/security section | Abuse limits |
 | `VERITAS_EXTENSION_ID` / `VERITAS_AUTH_DISABLED` | empty / off | CORS lockdown; dev auth opt-out |
 
 Every knob is read per request (`app/config.py:get_config()`), so changes take
 effect without a server restart.
+
+### Claim-text model: reproducible baseline, not a truth engine
+
+`backend/models/liar_mnb_v1.json` is a standard-library multinomial Naive
+Bayes artifact. It uses only statement text: no speaker, party, venue, subject,
+or past fact-check-history columns are allowed into training because those fields
+would leak information not present in a submitted article. The three preserved
+labels are `false` (`pants-fire`/`false`), `mixed` (`barely-true`/`half-true`),
+and `supported` (`mostly-true`/`true`).
+
+Rebuild it from scratch (the downloaded TSV files are ignored by Git):
+
+```bash
+cd backend
+python tools/train_text_model.py --download
+```
+
+The tool downloads the public LIAR train/validation/test splits, writes input
+SHA-256 values, parameters, label mapping, held-out metrics, and deployment-gate
+status into the JSON artifact. It has no `scikit-learn`, PyTorch, or transformer
+dependency. The model loader accepts only validated JSON, never pickle.
+
+The current baseline is **shadow-only**. On the untouched LIAR split it scored:
+
+| Split | Examples | Accuracy | Macro F1 | `false` F1 |
+|---|---:|---:|---:|---:|
+| Validation | 1,284 | 45.17% | 44.91% | 41.11% |
+| Test | 1,267 | 43.96% | 43.21% | 37.30% |
+
+At the conservative `false ≥ 0.80` operating point, validation precision was
+45.29% (test: 39.86%), which fails the required 70% validation-precision gate.
+Therefore it appears in `ai_signals["text_classifier"]` for inspection but has
+**zero effect on suspicion or the verdict**. This is intentional: a weak text
+classifier must not outrank deterministic cross-source evidence. It can only
+become an advisory, capped signal after a domain-matched model clears the gate;
+`VERITAS_TEXT_MODEL_ALLOW_UNQUALIFIED=1` exists solely for offline experiments.
+
+LIAR contains short English PolitiFact claims, not full articles and not Hindi
+or multilingual Indian news. The runtime refuses text with low known-vocabulary
+coverage rather than producing a false-looking probability. The LIAR mirror
+states that it is for research use; review dataset licensing before any
+commercial deployment.
 
 ## Repository layout
 
@@ -92,6 +146,7 @@ backend/
     cache.py         TTL caches: claims, RSS results, verifications
     sources.py       Trusted-outlet registry + configurable source-weight tiers
     textnorm.py      Shared stopword/suffix/date primitives (breaks layer cycle)
+    factcheck.py     Google Fact Check Tools API client (F-component blend)
     domain.py        Dataclasses: Evidence, SourceMatch, AnalysisResult
   requirements.txt
 
@@ -111,7 +166,11 @@ extension/
 cd backend
 python -m venv .venv && .venv\Scripts\activate     # Windows
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+
+# Dev mode: auth OFF so the extension works out of the box
+# (PowerShell)  $env:VERITAS_AUTH_DISABLED="1"; uvicorn app.main:app --reload --port 8000
+# (cmd)         set VERITAS_AUTH_DISABLED=1 && uvicorn app.main:app --reload --port 8000
+# (bash/zsh)    VERITAS_AUTH_DISABLED=1 uvicorn app.main:app --reload --port 8000
 ```
 
 Health check: `curl http://localhost:8000/health`
@@ -149,6 +208,26 @@ call is covered with a mocked transport. Live behavior against real news
 pages is verified separately (see the live-test reports in the project
 history).
 
+### Extreme-scenario soak test
+
+```bash
+cd backend
+python tools/soak.py --duration 3600   # one hour; Ctrl+C for partial summary
+```
+
+A stdlib-only chaos harness that hammers `analyze()` continuously across the
+full scenario bank (6 URLs × 3 article styles × 3 link layouts) with randomized
+retrieval failures — network `None`, empty bodies, garbage bytes, slow
+endpoints, and RSS pools aged from 5 minutes to 30 days (stale pools behind
+today-dated URLs, fresh pools for breaking news) — while asserting nine
+structural invariants on every result: verdict vocabulary, bounded
+suspicion/confidence, zero-score honesty, exactly-one cross-source evidence
+whose weight equals the applied `cross_weight` (the ERR-1 invariant), JSON
+debug payloads, evidence-score range, no own-outlet corroboration, no
+breaking state without a publication date, and full response
+serializability. Exit code 1 on any violation; every 7th iteration keeps
+caches warm to exercise the cache-hit freshness path.
+
 > **Architecture note:** the content script never calls the backend directly.
 > On an HTTPS page that fetch would be blocked as mixed content (verified in
 > a real browser); requests are relayed through the MV3 service worker
@@ -156,10 +235,12 @@ history).
 
 ## Roadmap (next milestones)
 
-1. **Trained ML classifier** — replace the stylometry heuristics with a fine-tuned
-   transformer (e.g. `roberta-base` or a multilingual `indic-bert`/MuRIL for Hindi +
-   English Indian news) trained on LIAR, FakeNewsNet and the Kaggle fake-news sets.
-   Keep the heuristic scores as explanation features.
+1. **Domain-matched trained classifier** — the reproducible LIAR baseline now
+   exists but failed its safety gate. Collect article-level, source-diverse,
+   time-split English/Hindi Indian-news labels before considering a fine-tuned
+   transformer (e.g. `roberta-base` or MuRIL). Report calibration, temporal
+   holdout performance, and outlet-held-out performance; keep it subordinate to
+   the deterministic evidence layer.
 2. **Real AI-image detection** — swap the byte-marker scan for a CNN/ViT detector
    (e.g. UniversalFakeDetect or SynthID-verify via API) and a reverse-image search
    (Google Lens API) to catch re-used/out-of-context photos.
@@ -256,7 +337,9 @@ security layer need no changes.
 - The AI-watermark checks are metadata/byte-marker based: they catch *declared*
   provenance and tool leakage, not statistical SynthID verification (needs Google's
   detector, not public).
-- Cross-checking fetches live pages; a failing network or paywall lowers
-  confidence rather than raising suspicion.
-- Heuristics are intentionally transparent; the ML roadmap upgrades accuracy
-  without changing the extension contract (`POST /analyze`).
+- Cross-checking fetches Google News RSS headlines (no paywalls); a failing
+  network or empty result lowers confidence rather than raising suspicion, and
+  is never treated as evidence against the article.
+- The bundled LIAR model is a reproducible diagnostic baseline, not a deployable
+  fake-news detector: it is English claim-level data, its validation gate is
+  currently failed, and it has no authority over evidence scoring or verdicts.

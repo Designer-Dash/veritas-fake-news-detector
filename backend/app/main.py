@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+import hashlib
 
 from .auth import auth_enabled, get_registry
+from .config import DEFAULT_REGION
 from .pipeline import analyze
 from .security import SecurityError, SlidingWindowLimiter, client_key
 
@@ -40,7 +43,7 @@ if _extension_id:
     _allowed_origins = [f"chrome-extension://{_extension_id}"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,  # empty = same-origin only until configured
+    allow_origins=["*"],  # empty = same-origin only until configured
     allow_credentials=False,
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type", "Authorization"],
@@ -60,15 +63,22 @@ _LIMIT_WINDOW = float(os.environ.get("VERITAS_RATE_WINDOW_SEC", "60"))
 _LIMIT_CONCURRENT = int(os.environ.get("VERITAS_MAX_CONCURRENT", "4"))
 
 
-def _limiter_for(rate_max: Optional[int]) -> SlidingWindowLimiter:
+def _limiter_for(key_id: str, rate_max: Optional[int]) -> SlidingWindowLimiter:
+    """Per-(identity, quota) limiter cache.
+
+    Keyed by (key_id, rate_max) so two identities that happen to share the
+    same quota never share a limiter object. (The limiter itself also keeps
+    per-key windows internally, so this is belt-and-braces: object-level
+    state can never leak across identities.)"""
     if rate_max is None:
         return _default_limiter
-    lim = _key_limiters.get(rate_max)
+    cache_key = (key_id, rate_max)
+    lim = _key_limiters.get(cache_key)
     if lim is None:
         lim = SlidingWindowLimiter(
             max_requests=rate_max, window_seconds=_LIMIT_WINDOW, max_concurrent=_LIMIT_CONCURRENT
         )
-        _key_limiters[rate_max] = lim
+        _key_limiters[cache_key] = lim
     return lim
 
 
@@ -77,9 +87,10 @@ MAX_HTML_BYTES = 400_000
 
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., min_length=8, max_length=2048)
-    region: str = Field("in", min_length=2, max_length=12)
+    region: str = Field(DEFAULT_REGION, min_length=2, max_length=12)
     html: Optional[str] = Field(None, max_length=MAX_HTML_BYTES)
     headline: Optional[str] = Field(None, max_length=512)
+    claim: Optional[str] = Field(None, max_length=512)
     include_cross_check: bool = Field(True)
 
     @field_validator("region")
@@ -127,17 +138,25 @@ def _authenticate(request: Request):
     ctx = get_registry().verify(presented)
     if ctx is None:
         # Small delay muddies timing-based probing of unknown keys.
-        import time
-
         time.sleep(0.05)
         raise HTTPException(status_code=401, detail="authentication required")
     return ctx.key_id, ctx.rate_max, f"user:{ctx.key_id}"
 
 
+def _url_log_safe(url: str) -> str:
+    """Return domain + SHA-256 prefix — enough to debug, not enough to reconstruct reading history."""
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
+        return f"{domain}#{url_hash}"
+    except Exception:
+        return "[url]"
+
 @app.post("/analyze")
 def analyze_endpoint(req: AnalyzeRequest, request: Request):
     key_id, rate_max, limiter_key = _authenticate(request)
-    limiter = _limiter_for(rate_max)
+    limiter = _limiter_for(key_id, rate_max)
     allowed, _retry = limiter.check(limiter_key)
     if not allowed:
         raise HTTPException(status_code=429, detail="rate limit exceeded")
@@ -147,6 +166,7 @@ def analyze_endpoint(req: AnalyzeRequest, request: Request):
             region=req.region,
             html=req.html,
             headline_override=req.headline,
+            claim_override=req.claim,
             include_cross_check=req.include_cross_check,
         )
         return result.to_dict()
@@ -154,7 +174,7 @@ def analyze_endpoint(req: AnalyzeRequest, request: Request):
         raise HTTPException(status_code=400, detail="invalid request")
     except Exception:
         # Log server-side without page content or credentials; generic error out.
-        logger.exception("analyze failed for %s", key_id)
+        logger.exception("analyze failed for %s on %s", key_id, _url_log_safe(req.url))
         raise HTTPException(status_code=502, detail="analysis failed")
     finally:
         limiter.release(limiter_key)

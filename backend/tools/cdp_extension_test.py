@@ -4,9 +4,17 @@ Launches headless Chromium (Edge build) with --load-extension, opens the
 The Hindu article, waits for the content script -> service worker -> backend
 round trip, and reports console output + banner state.
 
-Usage: python backend/tools/cdp_extension_test.py [url]
+Usage:
+    python backend/tools/cdp_extension_test.py                # default article
+    python backend/tools/cdp_extension_test.py <article-url>  # custom article
+    python backend/tools/cdp_extension_test.py --help         # does NOT run anything
+
+Requires the optional dev-only dependency ``websocket-client`` (not part of
+requirements.txt -- the runtime backend never needs it) and a Chrome-for-
+Testing/Edge binary; set VERITAS_CHROME_PATH to override the browser path.
 """
 
+import argparse
 import json
 import os
 import pathlib
@@ -15,14 +23,23 @@ import sys
 import time
 import urllib.request
 
-import websocket
+try:
+    import websocket
+except ImportError:  # pragma: no cover - environment problem, not a code path
+    websocket = None
 
 # Resolve the extension dir relative to this file: backend/tools -> project root.
 EXT = str((pathlib.Path(__file__).resolve().parents[2] / "extension"))
 # Branded Chrome/Edge Stable 137+ ignore --load-extension; Chrome for Testing keeps it.
-EDGE = r"C:\Users\Lenovo\AppData\Local\Temp\chrome-for-testing\extracted\chrome-win64\chrome.exe"
-PROFILE = r"C:\Users\Lenovo\AppData\Local\Temp\veritas-cdp-profile"
-DEBUG_PORT = 9223
+EDGE = os.environ.get(
+    "VERITAS_CHROME_PATH",
+    r"C:\Users\Lenovo\AppData\Local\Temp\chrome-for-testing\extracted\chrome-win64\chrome.exe",
+)
+PROFILE = os.environ.get(
+    "VERITAS_CDP_PROFILE",
+    r"C:\Users\Lenovo\AppData\Local\Temp\veritas-cdp-profile",
+)
+DEBUG_PORT = int(os.environ.get("VERITAS_CDP_PORT", "9223"))
 DEFAULT_URL = (
     "https://www.thehindu.com/news/national/"
     "india-bloc-meeting-today-who-are-attending-rahul-mamata-kharge-full-list-of-leaders/"
@@ -53,7 +70,17 @@ def kill_stale_headless() -> None:
 
 
 def main() -> int:
-    url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
+    ap = argparse.ArgumentParser(description="CDP harness: real extension vs live article")
+    ap.add_argument("url", nargs="?", default=DEFAULT_URL, help="article URL to analyze")
+    args = ap.parse_args()
+    if websocket is None:
+        print(
+            "cdp_extension_test: missing optional dev dependency 'websocket-client'.\n"
+            "Install it with: pip install websocket-client",
+            file=sys.stderr,
+        )
+        return 2
+    url = args.url
     kill_stale_headless()
     time.sleep(1)
 

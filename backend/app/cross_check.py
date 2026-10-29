@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .cache import get_cache
 from .config import get_config
 from .security import safe_fetch
-from .sources import outlets_for_region, source_weight
+from .sources import outlets_for_region, publisher_group, source_tier, source_weight
 from .textnorm import STOPWORDS, extract_url_date, parse_rfc822
 from .textnorm import strip_source_suffix as _strip_source_suffix
 
@@ -56,13 +56,25 @@ OUTLET_NAME_DOMAINS = {
     "the hindu": "thehindu.com",
     "hindustan times": "hindustantimes.com",
     "ndtv": "ndtv.com",
+    "the indian express": "indianexpress.com",
     "indian express": "indianexpress.com",
+    # BUG FIX: "The New Indian Express" is newindianexpress.com — a completely
+    # different newspaper from "The Indian Express" (indianexpress.com).
+    # Previously mapped incorrectly to indianexpress.com, which caused:
+    #   (a) The New Indian Express to be mistakenly flagged as the same outlet
+    #       as indianexpress.com and therefore self-excluded when thehindu.com
+    #       articles were analyzed, and
+    #   (b) Its source weight to be wrongly elevated to Tier-2 (0.85) instead
+    #       of its correct Unknown (0.40) weight.
+    "the new indian express": "newindianexpress.com",
+    "new indian express": "newindianexpress.com",
     "news18": "news18.com",
     "livemint": "livemint.com",
     "mint": "livemint.com",
     "business today": "businesstoday.in",
     "pti": "ptinews.com",
     "ani": "aninews.in",
+    "ani news": "aninews.in",
     "reuters": "reuters.com",
     "associated press": "apnews.com",
     "ap news": "apnews.com",
@@ -77,6 +89,76 @@ OUTLET_NAME_DOMAINS = {
     "financial times": "ft.com",
     "the independent": "independent.co.uk",
     "the telegraph": "telegraph.co.uk",
+    # Major Indian English outlets frequently appearing in Google News RSS
+    # but missing from the original map (fell through to unknown weight 0.40).
+    "the economic times": "economictimes.indiatimes.com",
+    "economic times": "economictimes.indiatimes.com",
+    "the print": "theprint.in",
+    "theprint": "theprint.in",
+    "the wire": "thewire.in",
+    "scroll": "scroll.in",
+    "scroll.in": "scroll.in",
+    "firstpost": "firstpost.com",
+    "the quint": "thequint.com",
+    "quint": "thequint.com",
+    "deccan herald": "deccanherald.com",
+    "business standard": "business-standard.com",
+    "zee news": "zeenews.india.com",
+    "india tv": "indiatvnews.com",
+    "wion": "wionews.com",
+    "moneycontrol": "moneycontrol.com",
+    "moneycontrol.com": "moneycontrol.com",
+    "the week": "theweek.in",
+    "theweek": "theweek.in",
+    "theweek.in": "theweek.in",
+    "aaj tak": "aajtak.in",
+    "tv9": "tv9bharatvarsh.com",
+    "news9": "news9live.com",
+    "the statesman": "thestatesman.com",
+    "telegraph india": "telegraphindia.com",
+    "the telegraph india": "telegraphindia.com",
+    "outlook": "outlookindia.com",
+    "outlook india": "outlookindia.com",
+    "cnbctv18": "cnbctv18.com",
+    "cnbc tv18": "cnbctv18.com",
+    "news laundry": "newslaundry.com",
+    "the diplomat": "thediplomat.com",
+    # Regional Indian outlets (user fix 5): Google News RSS reports these as
+    # display names; without a mapping they fall through to weight 0.40.
+    "dainik bhaskar": "dainikbhaskar.com",
+    "bhaskar": "bhaskar.com",
+    "divya bhaskar": "divyabhaskar.com",
+    "amar ujala": "amarujala.com",
+    "dainik jagran": "jagran.com",
+    "jagran": "jagran.com",
+    "rajasthan patrika": "patrika.com",
+    "patrika": "patrika.com",
+    "live hindustan": "livehindustan.com",
+    "navbharat times": "navbharattimes.indiatimes.com",
+    "punjab kesari": "punjabkesari.in",
+    "jansatta": "jansatta.com",
+    "eenadu": "eenadu.net",
+    "sakshi": "sakshi.com",
+    "andhra jyothy": "andhrajyothy.com",
+    "dinamalar": "dinamalar.com",
+    "dinamani": "dinamani.com",
+    "daily thanthi": "dailythanthi.com",
+    "vikatan": "vikatan.com",
+    "mathrubhumi": "mathrubhumi.com",
+    "malayala manorama": "manoramaonline.com",
+    "manorama": "manoramaonline.com",
+    "loksatta": "loksatta.com",
+    "maharashtra times": "maharashtratimes.com",
+    "anandabazar patrika": "anandabazar.com",
+    "bartaman": "bartamanpatrika.com",
+    "ei samay": "ei-samay.com",
+    "prajavani": "prajavani.net",
+    "udayavani": "udayavani.com",
+    "kannada prabha": "kannadaprabha.com",
+    "gujarat samachar": "gujaratsamachar.com",
+    "sambad": "sambad.net",
+    "dharitri": "dharitri.com",
+    "the tribune": "tribuneindia.com",
 }
 
 
@@ -150,6 +232,38 @@ def _google_news_url(query: str, region: str) -> str:
     )
 
 
+def _outlet_search_domains(region: str, count: int) -> List[str]:
+    """Choose distinct publisher groups for the compulsory outlet checks.
+
+    A site: query is an *attempt* to find reporting from that publisher. It
+    cannot guarantee coverage, so lack of a result remains insufficient
+    evidence rather than evidence against the claim.
+    """
+    selected: List[str] = []
+    groups = set()
+    for domain in outlets_for_region(region):
+        group = publisher_group(domain) or domain
+        if group in groups:
+            continue
+        groups.add(group)
+        selected.append(domain)
+        if len(selected) >= count:
+            break
+    return selected
+
+
+def _outlet_search_query(claim_text: str, domain: str) -> str:
+    """Google News RSS query restricted to one requested publisher.
+    Uses entity-action keyword extraction (no quotes) to ensure high Google News hit rate.
+    """
+    try:
+        from .query_builder import _outlet_search_query as _qb_outlet
+        return _qb_outlet(claim_text, domain)
+    except Exception:
+        compact = " ".join((claim_text or "").split())[:300]
+        return f"{compact} site:{domain}"
+
+
 def _fetch(url: str, timeout: int = TIMEOUT) -> Optional[bytes]:
     """All cross-check fetches go through the SSRF-guarded security layer."""
     return safe_fetch(url, timeout=timeout)
@@ -164,11 +278,23 @@ def _parse_rss_items(rss: Optional[bytes], limit: int) -> List[Dict[str, str]]:
         for item in root.iter("item"):
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
+            source_elem = item.find("source")
             source = (item.findtext("source") or "").strip()
+            source_url = (
+                source_elem.attrib.get("url", "").strip()
+                if source_elem is not None
+                else ""
+            )
             pub = (item.findtext("pubDate") or "").strip()
             if title and link:
                 items.append(
-                    {"title": title, "link": link, "outlet": source, "pub_date": pub}
+                    {
+                        "title": title,
+                        "link": link,
+                        "outlet": source,
+                        "source_url": source_url,
+                        "pub_date": pub,
+                    }
                 )
             if len(items) >= limit:
                 break
@@ -225,23 +351,87 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+def _title_fingerprint(title: str) -> str:
+    """Stable title fingerprint for obvious wire/repost duplicates.
+
+    This is intentionally narrow: it catches exact or near-exact syndicated
+    headlines but does not collapse independently worded reporting about the
+    same event into one source.
+    """
+    return " ".join(sorted(set(_tokenize(_strip_source_suffix(title)))))
+
+
+def _likely_syndicated(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    """Whether two candidates look like copies rather than independent work."""
+    lg = left.get("independence_group") or left.get("outlet")
+    rg = right.get("independence_group") or right.get("outlet")
+    if lg and rg and lg != rg:
+        return False
+    lf, rf = _title_fingerprint(left.get("title", "")), _title_fingerprint(right.get("title", ""))
+    if not lf or not rf:
+        return False
+    if lf == rf:
+        return True
+    left_tokens, right_tokens = set(lf.split()), set(rf.split())
+    overlap = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
+    ratio = difflib.SequenceMatcher(None, lf, rf).ratio()
+    return overlap >= 0.82 and ratio >= 0.90
+
+
+def _clean_host(host: str) -> str:
+    h = (host or "").lower().strip()
+    if h.startswith("www."):
+        h = h[4:]
+    elif h.startswith("m."):
+        h = h[2:]
+    return h
+
+
 def _resolve_outlet_domain(it: Dict[str, str], region: str) -> str:
     """Best-effort outlet domain for weighting/own-outlet exclusion.
 
     Google News RSS links are JS redirects that cannot be fetched
-    server-side, so the outlet is resolved from its display name first,
-    then from a direct article URL, then from the trusted-domain list.
+    server-side, so the outlet is resolved from its source_url attribute,
+    display name, article URL (if non-google), or title suffix.
     Returns "" when the outlet is unknown (weight 0.40 downstream).
     """
+    try:
+        from app.outlets import resolve_outlet
+        resolved = resolve_outlet(
+            source_name=it.get("outlet", ""),
+            source_url=it.get("source_url", ""),
+            title=it.get("title", ""),
+        )
+        if resolved.domain:
+            return resolved.domain
+    except Exception:
+        pass
+
+    source_url = (it.get("source_url") or "").strip()
+    if source_url:
+        host = _clean_host(urllib.parse.urlparse(source_url).netloc.split(":")[0])
+        if host and "news.google.com" not in host:
+            return host
+
     name = (it.get("outlet") or "").strip().lower()
     if name in OUTLET_NAME_DOMAINS:
         return OUTLET_NAME_DOMAINS[name]
-    link = it.get("link", "")
+
+    title = it.get("title", "")
+    if "-" in title or "–" in title or "—" in title:
+        parts = re.split(r"\s+[-–—]\s+", title)
+        if len(parts) > 1:
+            suffix_name = parts[-1].strip().lower()
+            if suffix_name in OUTLET_NAME_DOMAINS:
+                return OUTLET_NAME_DOMAINS[suffix_name]
+
+    link = (it.get("link") or "").strip()
     if link and "news.google.com" not in link:
-        host = urllib.parse.urlparse(link).netloc.lower().split(":")[0]
+        host = _clean_host(urllib.parse.urlparse(link).netloc.split(":")[0])
         if host:
             return host
-    blob = (link + " " + name).lower()
+
+    blob = (link + " " + name + " " + source_url + " " + title).lower()
     trusted = outlets_for_region(region)
     for t in trusted:
         if t in blob:
@@ -254,15 +444,23 @@ def _resolve_outlet_domain(it: Dict[str, str], region: str) -> str:
     return ""
 
 
+class CandidateList(list):
+    """List subclass that retains retrieval diagnostics as an attribute."""
+
+    def __init__(self, items=None, diagnostics=None):
+        super().__init__(items or [])
+        self.diagnostics = diagnostics or {}
+
+
 def retrieve_reference_sources(
     claim_text: str,
-    queries: List[str],
-    region: str,
+    queries: Optional[List[str]] = None,
+    region: str = "in",
     page_domain: str = "",
     cfg=None,
     fetch_func: Optional[Callable[..., Optional[bytes]]] = None,
     now: Optional[datetime] = None,
-) -> List[Dict[str, Any]]:
+) -> CandidateList:
     """Search the reference-source pool for a claim (spec:
     retrieveReferenceSources()).
 
@@ -286,73 +484,201 @@ def retrieve_reference_sources(
     cfg = cfg or get_config()
     fetch = fetch_func or _fetch
     now = now or datetime.now(timezone.utc)
+
+    if queries is None and fetch_func is None:
+        try:
+            from app.retrieval import Candidate, adaptive_retrieve
+
+            def _q_of(dom: str, nm: str) -> float:
+                return source_weight(dom, cfg)
+
+            def _same(a: Any, b: Any) -> bool:
+                t1 = a.title if isinstance(a, Candidate) else getattr(a, "title", str(a))
+                t2 = b.title if isinstance(b, Candidate) else getattr(b, "title", str(b))
+                d1 = a.domain if isinstance(a, Candidate) else getattr(a, "domain", "")
+                d2 = b.domain if isinstance(b, Candidate) else getattr(b, "domain", "")
+                return _likely_syndicated({"title": t1, "domain": d1}, {"title": t2, "domain": d2})
+
+            def _grp(dom: str) -> str:
+                return publisher_group(dom) or ""
+
+            res = adaptive_retrieve(claim_text, cfg, _q_of, _same, _grp)
+            items = []
+            for c in res.candidates:
+                sim = title_similarity(claim_text, c.title)
+                pub_iso = datetime.fromtimestamp(c.published, tz=timezone.utc).isoformat() if c.published else None
+                age_h = round(max((now.timestamp() - c.published) / 3600.0, 0.0), 1) if c.published else None
+                items.append({
+                    "outlet": c.outlet,
+                    "domain": c.domain,
+                    "url": c.link,
+                    "title": c.title[:200],
+                    "similarity": round(max(sim, 0.40), 3),
+                    "published": pub_iso,
+                    "age_hours": age_h,
+                    "independence_group": c.domain,
+                    "syndication_cluster_size": 1,
+                    "clustered_outlets": [c.outlet],
+                    "is_wire_syndication": c.is_wire_syndication,
+                    "wire_agency": c.wire_agency,
+                    "independence_weight": c.independence_weight,
+                    "tier": source_tier(c.domain),
+                })
+            cl = CandidateList(items, diagnostics={
+                "queries_run": res.queries_run,
+                "raw_items": res.raw_items,
+                "distinct_outlets": res.distinct_outlets,
+                "independent_origins": res.independent_origins,
+                "escalated": res.escalated,
+                "early_stopped": res.early_stopped,
+                "latency_ms": res.latency_ms,
+                "status": res.status,
+            })
+            cl.raw_items = res.raw_items
+            cl.distinct_outlets = res.distinct_outlets
+            cl.independent_origins = res.independent_origins
+            cl.escalated = res.escalated
+            return cl
+        except Exception:
+            pass
+
+    queries = list(queries or [claim_text])
     own_base = _registrable(page_domain) if page_domain else ""
     own_slug = _slug(page_domain)
     rss_cache = get_cache("rss", maxsize=512, ttl=cfg.rss_cache_ttl)
     candidates: Dict[str, Dict[str, Any]] = {}
     target = claim_text or ""
 
-    # Fetch phase: every uncached query goes out in parallel (stdlib
-    # threads), so a thin-coverage claim -- exactly the case that needs all
-    # queries -- costs one round trip (~TIMEOUT) instead of
-    # max_queries x TIMEOUT serially. Cached queries cost nothing and every
-    # result is TTL-cached, so repeat checks stay at zero requests. The
-    # merge below stays sequential and ordered: output is deterministic
-    # regardless of which fetch finishes first. Trade-off: early-stopping
-    # now discards (already-fetched) later results instead of skipping the
-    # fetch -- at most cfg.max_queries RSS GETs per uncached claim.
-    plan: List[Any] = []          # (query, cache_key, items | None on miss)
+    diag: Dict[str, Any] = {
+        "queries_generated": list(queries[: cfg.max_queries]),
+        "rss_requests": [],
+        "total_rss_items": 0,
+        "total_candidate_urls": 0,
+        "domain_resolution": {"resolved": 0, "unresolved": 0},
+        "normalized_publisher_domains": [],
+        "self_outlet_candidates_removed": 0,
+        "untrusted_candidates_count": 0,
+        "fetch_failures": 0,
+        "successfully_fetched": 0,
+        "semantically_relevant": 0,
+        "irrelevant_candidates": 0,
+        "same_owner_candidates_removed": 0,
+        "syndicated_candidates_removed": 0,
+        "independent_candidates": 0,
+    }
+
+    # The broad claim searches maximize recall. The separately scoped outlet
+    # searches make the 5-10 publisher policy observable and prevent a result
+    # from appearing before the configured set of publishers has been tried.
+    outlet_domains = _outlet_search_domains(region, cfg.outlet_checks)
+    diag["outlet_checks_requested"] = list(outlet_domains)
+    diag["outlet_checks_attempted"] = 0
+    diag["outlet_checks_with_results"] = 0
+    diag["off_outlet_results_rejected"] = 0
+
+    plan: List[Any] = []          # (query, cache_key, items, expected_domain, kind)
     uncached: List[str] = []
     for query in queries[: cfg.max_queries]:
         if not query or not _tokenize(query):
             continue
         cache_key = f"{region}:{query}"
         hit, items = rss_cache.get(cache_key)
-        plan.append((query, cache_key, items if hit else None))
+        plan.append((query, cache_key, items if hit else None, "", "broad"))
+        if not hit:
+            uncached.append(query)
+
+    for domain in outlet_domains:
+        query = _outlet_search_query(target, domain)
+        cache_key = f"{region}:{query}"
+        hit, items = rss_cache.get(cache_key)
+        plan.append((query, cache_key, items if hit else None, domain, "outlet"))
         if not hit:
             uncached.append(query)
 
     bodies: Dict[str, Optional[bytes]] = {}
     if uncached:
-        with ThreadPoolExecutor(max_workers=min(len(uncached), 4)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(uncached), 8)) as pool:
             futures = {
                 pool.submit(fetch, _google_news_url(q, region)): q for q in uncached
             }
             for fut in as_completed(futures):
                 q = futures[fut]
                 try:
-                    bodies[q] = fut.result()
+                    res = fut.result()
+                    bodies[q] = res
                 except Exception:
-                    bodies[q] = None  # a failing worker behaves like a failed fetch
+                    bodies[q] = None
 
-    for query, cache_key, items in plan:
+    for query, cache_key, items, expected_domain, kind in plan:
+        if kind == "outlet":
+            diag["outlet_checks_attempted"] += 1
         if items is None:
-            items = _parse_rss_items(bodies.get(query), cfg.max_query_sources)
-            # Never negative-cache: an empty result may be a transient
-            # network failure, and caching it would suppress recovery on
-            # the user's re-check.
+            raw_body = bodies.get(query)
+            if raw_body is None:
+                diag["fetch_failures"] += 1
+                diag["rss_requests"].append({"query": query, "status": "failed", "item_count": 0})
+            else:
+                diag["successfully_fetched"] += 1
+            items = _parse_rss_items(raw_body, cfg.max_query_sources)
             if items:
                 rss_cache.set(cache_key, items)
+                diag["rss_requests"].append({"query": query, "status": "success", "item_count": len(items)})
+        else:
+            diag["rss_requests"].append({"query": query, "status": "cache_hit", "item_count": len(items)})
+
+        diag["total_rss_items"] += len(items)
+        outlet_result_found = False
 
         for it in items:
+            diag["total_candidate_urls"] += 1
             domain = _resolve_outlet_domain(it, region)
+            if domain:
+                diag["domain_resolution"]["resolved"] += 1
+                if domain not in diag["normalized_publisher_domains"]:
+                    diag["normalized_publisher_domains"].append(domain)
+            else:
+                diag["domain_resolution"]["unresolved"] += 1
+
+            # Google News normally honours site:, but treat an off-outlet
+            # result as a retrieval miss rather than misrepresenting it as a
+            # check of the requested news publisher.
+            if expected_domain and (
+                not domain or _registrable(domain) != _registrable(expected_domain)
+            ):
+                diag["off_outlet_results_rejected"] += 1
+                continue
+            if expected_domain:
+                outlet_result_found = True
+
             if own_base and domain and _registrable(domain) == own_base:
-                continue  # the page's own outlet re-reporting itself is circular
+                diag["self_outlet_candidates_removed"] += 1
+                continue
             outlet = it.get("outlet", "") or domain or it.get("link", "")
             if not domain and own_slug:
                 out_slug = _slug(outlet)
                 if out_slug and (out_slug in own_slug or own_slug in out_slug):
+                    diag["self_outlet_candidates_removed"] += 1
                     continue
+
             sim = title_similarity(target, it["title"])
-            # Relevance: above the floor AND shares at least one content
-            # word with the claim (pure noise never enters the pool).
             shared = len(set(_tokenize(target)) & set(_tokenize(it["title"])))
             if sim < cfg.retrieval_floor or shared < 1:
+                diag["irrelevant_candidates"] += 1
                 continue
-            # One candidate per outlet (keeping its best match): independent
-            # sources matter, the same outlet reporting twice does not.
-            key = (outlet or "").strip().lower() or (it.get("link") or it["title"]).lower()
+            diag["semantically_relevant"] += 1
+
+            if source_tier(domain) == 0:
+                diag["untrusted_candidates_count"] += 1
+
+            # One outlet group is one piece of independent corroboration.  A
+            # documented ownership relationship is stronger evidence than a
+            # display-name match, so it comes before the normal per-domain
+            # duplicate handling.
+            independence_group = publisher_group(domain) if domain else ""
+            key = independence_group or (outlet or "").strip().lower() or (it.get("link") or it["title"]).lower()
             prev = candidates.get(key)
+            if prev is not None:
+                diag["same_owner_candidates_removed"] += 1
             if prev is None or prev["similarity"] < sim:
                 published = _parse_source_date(it)
                 age_hours = (
@@ -368,11 +694,28 @@ def retrieve_reference_sources(
                     "similarity": round(sim, 3),
                     "published": published.isoformat() if published else None,
                     "age_hours": age_hours,
+                    "independence_group": independence_group or domain,
+                    "syndication_cluster_size": 1,
+                    "clustered_outlets": [outlet],
                 }
 
-        # Early stop: enough relevant results to pick the strongest 5-10.
-        if len(candidates) >= cfg.max_sources + 5:
-            break
+        if kind == "outlet" and outlet_result_found:
+            diag["outlet_checks_with_results"] += 1
 
     ranked = sorted(candidates.values(), key=lambda c: c["similarity"], reverse=True)
-    return ranked
+    independent: List[Dict[str, Any]] = []
+    for candidate in ranked:
+        representative = next((item for item in independent if _likely_syndicated(candidate, item)), None)
+        if representative is None:
+            independent.append(candidate)
+            continue
+        # Keep the strongest match as the representative, but retain explicit
+        # provenance that copies were collapsed so reviewers can see why the
+        # source count is lower than the raw RSS count.
+        diag["syndicated_candidates_removed"] += 1
+        representative["syndication_cluster_size"] += 1
+        outlets = representative.setdefault("clustered_outlets", [])
+        if candidate.get("outlet") and candidate["outlet"] not in outlets:
+            outlets.append(candidate["outlet"])
+    diag["independent_candidates"] = len(independent)
+    return CandidateList(independent, diagnostics=diag)

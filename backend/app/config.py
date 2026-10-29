@@ -64,6 +64,19 @@ def _b(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _tld_whitelist() -> tuple:
+    """Registrable domains exempt from the lookalike-TLD penalty, from the
+    comma-separated VERITAS_TLD_WHITELIST env var."""
+    raw = os.environ.get("VERITAS_TLD_WHITELIST", "")
+    return tuple(sorted({d.strip().lower() for d in raw.split(",") if d.strip()}))
+
+
+# Single source of truth for the default analysis region. Imported by
+# app.main (AnalyzeRequest default) and app.pipeline (analyze default); the
+# extension keeps its own mirrored constant (JS cannot import Python).
+DEFAULT_REGION = "in"
+
+
 @dataclass(frozen=True)
 class VerificationConfig:
     # -- Evidence Score weights: E = w_m*M + w_c*C + w_f*F + w_s*S --------
@@ -128,15 +141,66 @@ class VerificationConfig:
     gemini_max_calls: int = 2       # per verification: extract + batch-compare
     gemini_timeout: float = 8.0
 
+    # -- Trained text-risk model (advisory signal; never a verdict) ----------
+    # The bundled model is standard-library multinomial Naive Bayes trained on
+    # labelled Indian news text (English headlines + full Hindi articles). It
+    # is deliberately capped, only applies when its vocabulary covers enough of
+    # the input, and is further gated by the artifact's own deployment decision
+    # (a model that failed any gate condition contributes zero weight). The
+    # original LIAR claim-level baseline is retained for comparison and can be
+    # selected with VERITAS_TEXT_MODEL_PATH. Cross-source scoring remains the
+    # system's factual-verification authority.
+    text_model_enabled: bool = True
+    text_model_min_tokens: int = 30
+    text_model_min_coverage: float = 0.10
+    text_model_false_threshold: float = 0.80
+    text_model_max_weight: float = 0.18
+    text_model_allow_unqualified: bool = False
+
     # -- Search / retrieval ---------------------------------------------------
     max_queries: int = 3            # 2-3 optimized search queries per article
     max_query_sources: int = 12     # RSS items fetched per search query
+    # Always attempt this many separately scoped publisher searches before
+    # returning a cross-source result. This is an attempt count, not a claim
+    # that every outlet has covered the story: thin/local/breaking stories
+    # must remain INSUFFICIENT_EVIDENCE rather than gaining invented sources.
+    outlet_checks: int = 5          # bounded to 5-10; Google News site: queries
+    retrieval_deadline_s: float = 2.5 # max latency for parallel multi-wave search
 
     # -- Caches (API efficiency: avoid duplicate searches/verification) -------
     claim_cache_ttl: float = 900.0
     rss_cache_ttl: float = 600.0
     verification_cache_ttl: float = 300.0
     gemini_cache_ttl: float = 900.0
+
+    # -- Confidence display score (deterministic, env-tunable) ----------------
+    # confidence = base + text bonus + verification bonus + domain bonus,
+    # then capped. The cap equals the reachable maximum of those four terms
+    # (0.55+0.15+0.15+0.05 = 0.90): no unreachable ceiling.
+    confidence_base: float = 0.55
+    confidence_text_bonus: float = 0.15           # enough text for stylometry
+    confidence_verification_bonus: float = 0.15   # >=1 cross-checked source
+    confidence_domain_bonus: float = 0.05         # known reputation signal
+    confidence_cap: float = 0.90
+
+    # -- Google Fact Check Tools API ------------------------------------------
+    # Professional fact-check reviews (claimReview) blended into the F
+    # component only — they never decide the verdict by themselves. The
+    # whole feature is dormant unless VERITAS_FACT_CHECK_API_KEY is set;
+    # the key is never logged and never appears in any response.
+    factcheck_api_key: str = ""
+    factcheck_enabled: bool = True
+    factcheck_max_results: int = 5
+    factcheck_timeout: float = 6.0
+    factcheck_cache_ttl: float = 300.0    # same default as verification cache
+    factcheck_weight: float = 0.30        # F' = (1-w)*F + w*FC, w in [0,1]
+    factcheck_reviewer_weight: float = 1.0
+
+    # -- Lookalike-TLD whitelist -----------------------------------------------
+    # Registrable domains exempt from the lookalike-TLD suspicion (a
+    # legitimate editorial outlet may live on a .news/.xyz-style domain).
+    # Built-in default is empty; extend via VERITAS_TLD_WHITELIST.
+    tld_whitelist: tuple = ()
 
 
 def get_config() -> VerificationConfig:
@@ -174,10 +238,34 @@ def get_config() -> VerificationConfig:
         gemini_model=_s("VERITAS_GEMINI_MODEL", "gemini-2.0-flash"),
         gemini_max_calls=max(1, _i("VERITAS_GEMINI_MAX_CALLS", 2)),
         gemini_timeout=_f("VERITAS_GEMINI_TIMEOUT", 8.0),
+        text_model_enabled=_b("VERITAS_TEXT_MODEL_ENABLED", default=True),
+        text_model_min_tokens=max(1, _i("VERITAS_TEXT_MODEL_MIN_TOKENS", 30)),
+        text_model_min_coverage=min(1.0, max(0.0, _f("VERITAS_TEXT_MODEL_MIN_COVERAGE", 0.10))),
+        text_model_false_threshold=min(0.99, max(0.50, _f("VERITAS_TEXT_MODEL_FALSE_THRESHOLD", 0.80))),
+        text_model_max_weight=min(0.25, max(0.0, _f("VERITAS_TEXT_MODEL_MAX_WEIGHT", 0.18))),
+        text_model_allow_unqualified=_b("VERITAS_TEXT_MODEL_ALLOW_UNQUALIFIED", default=False),
         max_queries=max(1, _i("VERITAS_MAX_QUERIES", 3)),
         max_query_sources=max(1, _i("VERITAS_MAX_QUERY_SOURCES", 12)),
+        outlet_checks=min(10, max(5, _i("VERITAS_OUTLET_CHECKS", 5))),
         claim_cache_ttl=_f("VERITAS_CLAIM_CACHE_TTL", 900.0),
         rss_cache_ttl=_f("VERITAS_RSS_CACHE_TTL", 600.0),
         verification_cache_ttl=_f("VERITAS_VERIFICATION_CACHE_TTL", 300.0),
         gemini_cache_ttl=_f("VERITAS_GEMINI_CACHE_TTL", 900.0),
+        confidence_base=_f("VERITAS_CONFIDENCE_BASE", 0.55),
+        confidence_text_bonus=_f("VERITAS_CONF_TEXT_BONUS", 0.15),
+        confidence_verification_bonus=_f("VERITAS_CONF_VERIFICATION_BONUS", 0.15),
+        confidence_domain_bonus=_f("VERITAS_CONF_DOMAIN_BONUS", 0.05),
+        confidence_cap=_f("VERITAS_CONFIDENCE_CAP", 0.90),
+        factcheck_api_key=os.environ.get("VERITAS_FACT_CHECK_API_KEY", "").strip(),
+        factcheck_enabled=_b("VERITAS_FACT_CHECK_ENABLED", default=True),
+        factcheck_max_results=max(1, _i("VERITAS_FACT_CHECK_MAX_RESULTS", 5)),
+        factcheck_timeout=_f("VERITAS_FACT_CHECK_TIMEOUT", 6.0),
+        factcheck_cache_ttl=_f("VERITAS_FACT_CHECK_CACHE_TTL", 300.0),
+        factcheck_weight=min(1.0, max(0.0, _f("VERITAS_FACT_CHECK_WEIGHT", 0.30))),
+        factcheck_reviewer_weight=max(0.0, _f("VERITAS_FACT_CHECK_REVIEWER_WEIGHT", 1.0)),
+        retrieval_deadline_s=max(0.5, _f("VERITAS_RETRIEVAL_DEADLINE_S", 2.5)),
+        tld_whitelist=_tld_whitelist(),
     )
+
+
+settings = get_config()

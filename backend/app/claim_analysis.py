@@ -140,16 +140,50 @@ def normalize_claim(text: str) -> str:
     return " ".join(tokens)
 
 
+# Words that degrade Google News RSS query quality: question words, generic
+# temporals and filler words that appear frequently in headlines but do NOT
+# distinguish one news event from another.  These are filtered from
+# _search_tokens() in addition to the function-word STOPWORDS so that, e.g.,
+# "Who is attending INDIA Bloc meet today? Mamata Banerjee, other top leaders
+# gather in Delhi over EC row" produces the crisp query
+# "india bloc meet mamata banerjee delhi ec row" rather than the noisy
+# "attending india bloc meet today mamata banerjee top leaders gather".
+#
+# This is separate from STOPWORDS so the two lists stay independently tunable
+# (STOPWORDS affects normalization/similarity; _QUERY_NOISE only affects
+# search-query generation).
+_QUERY_NOISE: set = {
+    # Question words (common in interrogative headlines)
+    "who", "what", "where", "when", "why", "how", "which", "whom",
+    # Temporal filler (adds no search value)
+    "today", "yesterday", "tomorrow", "tonight", "now", "soon", "recently",
+    "latest", "recent", "new", "just", "breaking", "live", "update", "updates",
+    # Generic nouns / adjectives that dilute queries
+    "top", "other", "big", "key", "major", "main", "first", "second",
+    "every", "several", "many", "much", "amid", "over", "after",
+    "leader", "leaders", "official", "officials", "party", "parties",
+    "meeting", "meet", "gather", "gathering", "attending", "attended",
+    "says", "said", "say", "tells", "told", "tell", "calls", "call",
+    "hits", "hit", "slams", "slam", "urges", "urge", "demands", "demand",
+    "know", "here", "watch", "read", "check", "see", "look",
+}
+
+
+_ALLOWED_SHORT_TOKENS: set = {
+    "ec", "eu", "uk", "us", "un", "up", "mp", "ap", "pr", "ai", "it", "pm", "cm",
+}
+
+
 def _search_tokens(text: str) -> List[str]:
-    """Tokens suitable for a news search query: order preserved, stopwords
-    and URL noise dropped, digits/units kept."""
+    """Tokens suitable for a news search query: order preserved, stopwords,
+    URL noise and query-diluting filler words dropped, digits/units kept."""
     t = _strip_source_suffix(text or "").lower()
     t = re.sub(r"[^a-z0-9\s-]", " ", t)
     out: List[str] = []
     for w in t.split():
-        if w in STOPWORDS or w in _URL_NOISE:
+        if w in STOPWORDS or w in _URL_NOISE or w in _QUERY_NOISE:
             continue
-        if len(w) < 3 and not w.isdigit():
+        if len(w) < 3 and not w.isdigit() and w not in _ALLOWED_SHORT_TOKENS:
             continue
         if w not in out:
             out.append(w)
@@ -208,13 +242,52 @@ def _find_location(headline: str, text: str) -> str:
     return ""
 
 
+def _strip_interrogative(headline: str) -> str:
+    """If a headline is an interrogative question followed by a declarative
+    clause, keep only the declarative clause as the canonical claim text.
+
+    Example: "Who is attending INDIA Bloc meet today? Mamata Banerjee, other
+    top leaders gather in Delhi over EC row"
+    → "INDIA Bloc: Mamata Banerjee, other top leaders gather in Delhi over EC row"
+
+    The question preamble adds zero factual content and severely dilutes
+    similarity scoring against reference headlines (which never phrase the
+    same fact as a question). Any key subject entities in the preamble are
+    preserved so context is not lost.
+    """
+    q_mark = headline.find("?")
+    if q_mark == -1:
+        return headline
+    before = headline[:q_mark].strip()
+    after = headline[q_mark + 1:].strip()
+    before_lower = before.lower()
+    _Q_STARTS = (
+        "who ", "what ", "which ", "where ", "when ", "why ", "how ",
+        "is ", "are ", "was ", "were ", "will ", "would ", "can ", "could ",
+        "should ", "did ", "does ", "do ", "has ", "have ", "had ",
+        "here's", "here is",
+    )
+    if any(before_lower.startswith(q) for q in _Q_STARTS) and len(after) > 20:
+        entities = _headline_entities(before)
+        if entities:
+            subj = " ".join(entities)
+            if not any(e.lower() in after.lower() for e in entities):
+                return f"{subj}: {after}"
+        return after
+    return headline
+
+
 def _deterministic_claim(headline: str, article_text: str = "") -> Claim:
-    base = _strip_source_suffix(headline or "").strip()
-    entities = _headline_entities(base)
+    # Preserve the full headline for entity/number/date extraction, but use
+    # the stripped (non-interrogative) form as the canonical claim text that
+    # will be compared against reference source titles.
+    original = _strip_source_suffix(headline or "").strip()
+    base = _strip_interrogative(original)
+    entities = _headline_entities(original)  # use full form for entity extraction
     numbers: List[str] = []
     facts: List[Dict[str, Any]] = []
 
-    for m in RE_NUMBER_FACT.finditer(f"{base} {article_text[:600]}"):
+    for m in RE_NUMBER_FACT.finditer(f"{original} {article_text[:600]}"):
         value = m.group(0).strip()
         digits = re.sub(r"\D", "", value)
         if len(digits) < 1 or not digits:
@@ -226,11 +299,11 @@ def _deterministic_claim(headline: str, article_text: str = "") -> Claim:
         if len(numbers) >= 4:
             break
 
-    date = _find_date(base, article_text)
+    date = _find_date(original, article_text)
     if date:
         facts.append({"type": "date", "value": date, "critical": True})
 
-    location = _find_location(base, article_text)
+    location = _find_location(original, article_text)
     if location:
         facts.append({"type": "location", "value": location, "critical": True})
 
@@ -381,16 +454,23 @@ def generate_search_queries(claim: Claim, headline: str = "") -> List[str]:
     for q in claim.search_queries:
         _add(q)
 
-    if len(out) < 2:
-        base_tokens = _search_tokens(claim.claim or headline)
-        if base_tokens:
-            _add(" ".join(base_tokens[:10]))
-            # Distinctive (longest) tokens catch paraphrased coverage.
-            distinctive = sorted(set(base_tokens), key=lambda w: (-len(w), w))
-            _add(" ".join(distinctive[:6]))
-        head_tokens = _search_tokens(headline or claim.claim)
-        if head_tokens:
-            _add(" ".join(head_tokens[:6]))
+    try:
+        from .query_builder import _broad_search_queries
+        for bq in _broad_search_queries(claim.claim or headline):
+            _add(bq)
+    except Exception:
+        pass
+
+    base_tokens = _search_tokens(claim.claim or headline)
+    head_tokens = _search_tokens(headline or claim.claim)
+
+    if base_tokens and len(out) < cfg.max_queries:
+        _add(" ".join(base_tokens[:10]))
+    if head_tokens and len(out) < cfg.max_queries:
+        _add(" ".join(head_tokens[:10]))
+    if base_tokens and len(out) < cfg.max_queries:
+        distinctive = sorted(set(base_tokens), key=lambda w: (-len(w), w))
+        _add(" ".join(distinctive[:6]))
 
     logger.debug("search queries: %s", out)
     return out

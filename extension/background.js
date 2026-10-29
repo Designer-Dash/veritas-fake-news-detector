@@ -71,11 +71,14 @@ async function handleFetch(payloadRaw, sendResponse) {
     if (apiKey && /^vfnd_[A-Za-z0-9_-]{20,80}$/.test(apiKey)) {
       headers["Authorization"] = "Bearer " + apiKey;
     }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort("timeout"), 15000);
     const res = await fetch(cfg.backend.replace(/\/$/, "") + "/analyze", {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-    });
+      signal: ctrl.signal,
+    }).finally(() => clearTimeout(timer));
     if (res.status === 401) {
       sendResponse({ error: "Authentication failed — check your API key in Veritas settings." });
       return;
@@ -112,10 +115,18 @@ async function handleFetch(payloadRaw, sendResponse) {
       sources_checked: typeof data.ai_signals?.cross_check?.checked === "number"
         ? data.ai_signals.cross_check.checked
         : 0,
+      independent_origins: typeof data.ai_signals?.cross_check?.independent_origins === "number"
+        ? data.ai_signals.cross_check.independent_origins
+        : undefined,
       corroborating_sources: Array.isArray(data.corroborating_sources)
-        ? data.corroborating_sources.slice(0, 3).map((m) => ({
+        ? data.corroborating_sources.slice(0, 10).map((m) => ({
             outlet: typeof m.outlet === "string" ? m.outlet.slice(0, 80) : "",
-            url: typeof m.url === "string" && /^https:\/\//i.test(m.url) ? m.url : "",
+            url: typeof m.url === "string" && /^https?:\/\//i.test(m.url) ? m.url : "",
+            title: typeof m.title === "string" ? m.title.slice(0, 200) : "",
+            tier: typeof m.tier === "number" ? m.tier : 3,
+            published: typeof m.published === "number" ? m.published : (typeof m.published === "string" ? Date.parse(m.published) / 1000 : null),
+            is_wire_syndication: Boolean(m.is_wire_syndication),
+            wire_agency: typeof m.wire_agency === "string" ? m.wire_agency : null,
           }))
         : [],
       ai_media: aiMedia,

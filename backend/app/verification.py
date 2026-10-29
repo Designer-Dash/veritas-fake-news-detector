@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from .claim_analysis import Claim, normalize_claim
+from .claim_analysis import Claim, normalize_claim, _QUERY_NOISE, _ALLOWED_SHORT_TOKENS
 from .config import VerificationConfig, get_config
 from .gemini_client import CallBudget, gemini_json
 from .sources import source_tier, source_weight
@@ -104,6 +104,8 @@ class SourceAssessment:
     similarity: float = 0.0      # M contribution, 0-100
     relationship: str = UNKNOWN  # SUPPORTS | CONTRADICTS | UNKNOWN
     compared_by: str = "deterministic"  # or "gemini"
+    independence_group: str = ""
+    syndication_cluster_size: int = 1
 
     @property
     def relevant(self) -> bool:
@@ -120,6 +122,8 @@ class SourceAssessment:
             "similarity": round(self.similarity, 1),
             "relationship": self.relationship,
             "compared_by": self.compared_by,
+            "independence_group": self.independence_group,
+            "syndication_cluster_size": self.syndication_cluster_size,
         }
 
 
@@ -144,6 +148,7 @@ class VerificationResult:
     queries: List[str] = field(default_factory=list)
     region: str = ""
     gemini_compared: bool = False
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     # -- convenience views -------------------------------------------------
     @property
@@ -196,6 +201,7 @@ class VerificationResult:
             "queries": list(self.queries),
             "region": self.region,
             "gemini_compared": self.gemini_compared,
+            "diagnostics": dict(self.diagnostics),
         }
 
 
@@ -225,22 +231,35 @@ def calculate_semantic_similarity(
     b = normalize_claim(ref_text)
     if not a or not b:
         return 0.0
-    # Wording-tolerant blend of three views of the same question "do these
-    # two discuss the same underlying claim?":
-    #   * jaccard — exact normalized-token overlap (conservative),
-    #   * recall  — share of the smaller claim's content words covered
-    #               (paraphrases reuse the key words in new wording),
-    #   * ratio   — character-level sequence ratio (catches reordering).
-    # Unrelated stories score near 0 on all three; paraphrases of one
-    # event clear the relevance/supports thresholds.
-    ta, tb = set(a.split()), set(b.split())
-    if not ta or not tb:
+    # Wording-tolerant blend of four views of "do these discuss the same event?":
+    #   * jaccard  — exact normalized-token overlap (conservative),
+    #   * recall   — share of the SMALLER claim's content words covered in the
+    #                other; this is the best signal for news paraphrases where
+    #                outlets reuse the key named entities but change sentence
+    #                structure (e.g. "INDIA Bloc meet Delhi Mamata" vs "Mamata
+    #                Banerjee attends INDIA Bloc meeting in Delhi"),
+    #   * ratio    — character-level sequence ratio (catches reordering),
+    #   * entities — named-entity overlap bonus: proper nouns shared across
+    #                both strings strongly indicate the same underlying event.
+    # Weights tuned so paraphrased same-event headlines score 50-70 while
+    # genuinely unrelated stories stay below 30. Old: 0.40j+0.30r+0.30d.
+    ta_raw, tb_raw = set(a.split()), set(b.split())
+    if not ta_raw or not tb_raw:
         return 0.0
+    # Filter generic news filler words so token overlap focuses on factual content
+    ta = {w for w in ta_raw if w not in _QUERY_NOISE} or ta_raw
+    tb = {w for w in tb_raw if w not in _QUERY_NOISE} or tb_raw
     inter = len(ta & tb)
     jac = inter / len(ta | tb)
     recall = inter / min(len(ta), len(tb))
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
-    return round(_clamp((0.40 * jac + 0.30 * recall + 0.30 * ratio) * 100.0), 1)
+    # Entity bonus: distinctive non-stopword tokens (>= 4 chars or known 2-letter acronyms)
+    long_a = {w for w in ta if len(w) >= 4 or w in _ALLOWED_SHORT_TOKENS}
+    long_b = {w for w in tb if len(w) >= 4 or w in _ALLOWED_SHORT_TOKENS}
+    long_inter = len(long_a & long_b)
+    entity_bonus = long_inter / max(min(len(long_a), len(long_b)), 1) if (long_a and long_b) else 0.0
+    score = (0.25 * jac + 0.45 * recall + 0.20 * ratio + 0.10 * entity_bonus) * 100.0
+    return round(_clamp(score), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +689,51 @@ def detect_breaking_news(
 
 
 # ---------------------------------------------------------------------------
+# 11b. Fact-check blend (Feature A: Google Fact Check Tools API)
+# ---------------------------------------------------------------------------
+
+def blend_fact_check(
+    f_score: float,
+    fact_checks: Optional[List[Any]] = None,
+    cfg: Optional[VerificationConfig] = None,
+) -> float:
+    """Fold professional fact-check reviews into F (spec item: weight them
+    into the factual-consistency component). Duck-typed on ``.relationship``
+    so verification.py needs no import from app.factcheck (no cycle).
+
+    Each review contributes cfg.factcheck_reviewer_weight to one of three
+    buckets: SUPPORTS (full credit), CONTRADICTS (no credit), and everything
+    else — MIXED or UNKNOWN (half credit: unverified is not disproved, the
+    same half-weight principle as fact_unmentioned_factor). The bucket score
+    mirrors the consensus formula:  FC = (W_s + 0.5*W_o) / (W_s+W_o+W_c) * 100.
+    With no reviews FC is never computed and F passes through unchanged.
+
+    F' = (1 - factcheck_weight) * F + factcheck_weight * FC, clamped 0-100.
+    Deterministic; the fact-check API never decides anything by itself.
+    """
+    cfg = cfg or get_config()
+    if not fact_checks:
+        return round(_clamp(f_score), 1)
+    w_s = w_o = w_c = 0.0
+    for fc in fact_checks:
+        rel = str(getattr(fc, "relationship", UNKNOWN))
+        w = float(cfg.factcheck_reviewer_weight)
+        if rel == SUPPORTS:
+            w_s += w
+        elif rel == CONTRADICTS:
+            w_c += w
+        else:
+            w_o += w
+    total = w_s + w_o + w_c
+    if total <= 0:
+        return round(_clamp(f_score), 1)
+    fc_score = (w_s + 0.5 * w_o) / total * 100.0
+    w = float(cfg.factcheck_weight)
+    blended = (1.0 - w) * float(f_score) + w * fc_score
+    return round(_clamp(blended), 1)
+
+
+# ---------------------------------------------------------------------------
 # 12. Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -682,6 +746,7 @@ def get_final_verification_result(
     budget: Optional[CallBudget] = None,
     cfg: Optional[VerificationConfig] = None,
     median_source_age_hours: Optional[float] = None,
+    fact_checks: Optional[List[Any]] = None,
 ) -> VerificationResult:
     """Run the full deterministic scoring pipeline (spec:
     getFinalVerificationResult()).
@@ -692,6 +757,10 @@ def get_final_verification_result(
     `median_source_age_hours` is the freshness of that pool (see
     app.cross_check.median_source_age()); it gates BREAKING_NEWS so stale
     coverage never masquerades as a just-happened event.
+
+    `fact_checks` optionally carries professional fact-check reviews
+    (app.factcheck.FactCheckAssessment); they are blended into the F
+    component only (see blend_fact_check) and never decide the verdict.
     """
     cfg = cfg or get_config()
     queries = list(queries or [])
@@ -737,6 +806,8 @@ def get_final_verification_result(
                 similarity=sim,
                 relationship=rel,
                 compared_by="gemini" if g else "deterministic",
+                independence_group=str(src.get("independence_group", "")),
+                syndication_cluster_size=max(1, int(src.get("syndication_cluster_size", 1))),
             )
         )
 
@@ -762,6 +833,7 @@ def get_final_verification_result(
     C = calculate_consensus(assessments, cfg, coverage_multiplier=coverage_for_consensus)
 
     F = calculate_fact_consistency(claim, assessments, cfg)
+    F = blend_fact_check(F, fact_checks, cfg)
     S = calculate_source_quality(assessments)
     E = calculate_evidence_score(M, C, F, S, cfg)
     e_final, penalty_applied = apply_contradiction_penalty(E, assessments, cfg)
@@ -774,6 +846,16 @@ def get_final_verification_result(
         state = INSUFFICIENT
     else:
         state = SUFFICIENT
+
+    retrieval_diag = dict(getattr(candidates, "diagnostics", {}))
+    retrieval_diag.update(
+        {
+            "supports_count": len([a for a in assessments if a.relationship == SUPPORTS]),
+            "contradicts_count": len([a for a in assessments if a.relationship == CONTRADICTS]),
+            "unknown_count": len([a for a in assessments if a.relationship == UNKNOWN]),
+            "final_accepted_evidence_count": selected,
+        }
+    )
 
     result = VerificationResult(
         state=state,
@@ -793,6 +875,7 @@ def get_final_verification_result(
         queries=queries,
         region=region,
         gemini_compared=gemini_used,
+        diagnostics=retrieval_diag,
     )
 
     logger.debug("claim: %s", claim.claim)

@@ -19,6 +19,9 @@ import pytest  # noqa: E402
 @pytest.fixture(autouse=True)
 def _isolated_verification_state(monkeypatch):
     monkeypatch.setenv("VERITAS_GEMINI_ENABLED", "0")
+    # Existing pipeline tests are intentionally model-free. Dedicated model
+    # tests supply a tiny deterministic artifact and explicitly enable it.
+    monkeypatch.setenv("VERITAS_TEXT_MODEL_ENABLED", "0")
     from app.cache import clear_caches
 
     clear_caches()
